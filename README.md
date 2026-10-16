@@ -29,7 +29,7 @@ If you try it, [report a bug or suggest a feature](https://github.com/sanxchep/l
 - **Debian package** (`licasa_0.5.0-1_amd64.deb`): for Ubuntu 24.04 on amd64. APT installs the required system libraries and QML modules.
 - **Snap beta**: available through the Snap Store on systems with Snapd.
 
-The GitHub release also includes `licasa_0.5.0_amd64.snap` and a checksum file. If you want to install that file directly, check its checksum and run `sudo snap install --dangerous ./licasa_0.5.0_amd64.snap`. A directly installed Snap does not follow Store updates; use the beta channel for automatic updates.
+The GitHub prerelease and final release include `licasa_0.5.0_amd64.snap` and a checksum file. If you want to install that file directly, check its checksum and run `sudo snap install --dangerous ./licasa_0.5.0_amd64.snap`. A directly installed Snap does not follow Store updates; use a Store channel for automatic updates.
 
 Download the AppImage and installer script into the same folder, then run:
 
