@@ -5,10 +5,10 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(Licasa
-        VERSION 0.5.1
+        VERSION 0.6.0
         LANGUAGES CXX
 )
-set(LICASA_RELEASE_DATE "2026-10-16")
+set(LICASA_RELEASE_DATE "2026-10-20")
 
 # Qt 6 requires C++17 or newer.
 set(CMAKE_CXX_STANDARD 17)
@@ -369,6 +369,15 @@ add_library(licasa_image_services STATIC
         src/imaging/image_processing.h)
 target_include_directories(licasa_image_services PUBLIC src)
 target_link_libraries(licasa_image_services PUBLIC Qt6::Quick)
+find_package(PNG 1.6 QUIET)
+if(PNG_FOUND)
+    set(LICASA_HAVE_FAST_PNG_PREVIEW TRUE)
+    target_sources(licasa_image_services PRIVATE
+            src/imaging/fast_png_preview.cpp
+            src/imaging/fast_png_preview.h)
+    target_link_libraries(licasa_image_services PUBLIC PNG::PNG)
+    target_compile_definitions(licasa_image_services PRIVATE LICASA_HAVE_FAST_PNG_PREVIEW=1)
+endif()
 find_package(TIFF QUIET)
 if(TIFF_FOUND AND TIFF_VERSION_STRING VERSION_GREATER_EQUAL "4.5")
     set(LICASA_HAVE_FAST_TIFF_PREVIEW TRUE)

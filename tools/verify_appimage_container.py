@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -39,7 +41,7 @@ def main() -> None:
             "RUN apt-get update && apt-get install -y --no-install-recommends "
             "libx11-6 libxext6 libxcb1 libgl1 libegl1 libopengl0 "
             "libfontconfig1 libharfbuzz0b libdbus-1-3 "
-            "desktop-file-utils xdg-utils "
+            "desktop-file-utils xdg-utils xvfb x11-utils weston libgl1-mesa-dri "
             "&& rm -rf /var/lib/apt/lists/*\n"
             "COPY --chmod=755 Licasa.AppImage /opt/Licasa.AppImage\n"
             "COPY --chmod=755 install-licasa-appimage.sh /opt/install-licasa-appimage.sh\n")
@@ -120,6 +122,47 @@ def main() -> None:
         if installed.returncode:
             raise RuntimeError("FUSE-free AppImage desktop installation failed:\n"
                                f"{installed.stdout}\n{installed.stderr}")
+        displays = {}
+        for protocol in ("x11", "wayland"):
+            for mode in ("default", "software"):
+                name = f"{protocol}_{mode}"
+                display_script = (
+                    "mkdir -p \"$HOME\" \"$XDG_CONFIG_HOME\"; "
+                    "/opt/install-licasa-appimage.sh /opt/Licasa.AppImage; "
+                    "desktop-file-validate \"$XDG_DATA_HOME/applications/licasa-appimage.desktop\"; "
+                    "xdg-mime default licasa-appimage.desktop image/jpeg; "
+                    "test \"$(xdg-mime query default image/jpeg)\" = licasa-appimage.desktop; "
+                    "cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null; "
+                    "sh /opt/check_display_session.sh "
+                    '"$HOME/.local/opt/licasa-appimage/AppRun" '
+                    "/tmp/squashfs-root/usr/bin/licasa_diagnostics /samples/photo.jpg "
+                    f"{protocol} {mode}"
+                )
+                display = subprocess.run(
+                    ["docker", "run", "--rm", "--network", "none", "--read-only",
+                     "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--shm-size", "256m",
+                     "--user", "65534:65534", "--cap-drop", "ALL",
+                     "-e", "HOME=/tmp/home", "-e", "XDG_DATA_HOME=/tmp/home/.local/share",
+                     "-e", "XDG_CONFIG_HOME=/tmp/home/.config",
+                     "-e", "XDG_RUNTIME_DIR=/tmp/runtime",
+                     "-v", f"{ROOT / 'tools/check_display_session.sh'}:/opt/check_display_session.sh:ro",
+                     "-v", f"{samples[0]}:/samples/photo.jpg:ro", tag,
+                     "sh", "-ec", display_script], capture_output=True, text=True, timeout=100,
+                )
+                if display.returncode:
+                    raise RuntimeError(f"Ubuntu AppImage {name} failed:\n"
+                                       f"{display.stdout}\n{display.stderr}")
+                graphics = re.search(r"graphicsApi=([A-Za-z0-9]+)", display.stdout)
+                fallback = re.search(r"diagnostic_fallback=(true|false); app_retry=(true|false)",
+                                     display.stdout)
+                if not graphics or not fallback:
+                    raise RuntimeError(f"Ubuntu AppImage {name} has incomplete results:\n"
+                                       f"{display.stdout}")
+                displays[name] = {"graphics_api": graphics.group(1),
+                                  "diagnostic_fallback": fallback.group(1) == "true",
+                                  "app_retry": fallback.group(2) == "true"}
+        report["display_sessions"] = displays
+        report["appimage_sha256"] = hashlib.sha256(appimage.read_bytes()).hexdigest()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(f"Clean AppImage launched the viewer and decoded {len(samples)} samples: {args.output}")

@@ -24,11 +24,15 @@
 #include <QGuiApplication>
 #include <QIcon>
 #include <QLocale>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QQmlApplicationEngine>
+#include <QTimer>
 #include <QVariantMap>
 
 int main(int argc, char* argv[])
 {
+    constexpr int softwareRetryExitCode = 42;
     Licasa::RuntimeErrorLog runtimeErrorLog;
     Licasa::ImageResourcePolicy::initializeDecoderEnvironment();
     Licasa::configureSurfaceFormatForRequestedOpenGL();
@@ -88,6 +92,31 @@ int main(int argc, char* argv[])
     };
 
     Licasa::WindowManager windowManager(&engine, sharedWindowProperties);
+    bool graphicsFailureHandled = false;
+    QObject::connect(&windowManager, &Licasa::WindowManager::initialGraphicsFailed, &application,
+                     [&](const QString& message) {
+                         if (graphicsFailureHandled) {
+                             return;
+                         }
+                         graphicsFailureHandled = true;
+                         const bool mayRetry = qEnvironmentVariableIsEmpty("QT_QUICK_BACKEND") &&
+                                               qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND") &&
+                                               !qEnvironmentVariableIsSet("LICASA_SOFTWARE_RETRY");
+                         if (mayRetry) {
+                             qWarning().noquote()
+                                 << "[Licasa] Graphics initialization failed; retrying once "
+                                    "with the Qt software renderer:"
+                                 << message;
+                         } else {
+                             qCritical().noquote()
+                                 << "[Licasa] Graphics initialization failed with no "
+                                    "automatic retry available:"
+                                 << message;
+                         }
+                         QTimer::singleShot(0, &application, [mayRetry]() {
+                             QCoreApplication::exit(mayRetry ? softwareRetryExitCode : 1);
+                         });
+                     });
     windowManager.setMotionPhotoResourcePolicy(&imageResourcePolicy);
     windowManager.setImageResourcePolicy(&imageResourcePolicy);
     windowManager.setImageProvider(decodeProvider);
@@ -111,5 +140,21 @@ int main(int argc, char* argv[])
 
     const int exitCode = application.exec();
     decodeProvider->waitForPendingWork();
+    if (exitCode == softwareRetryExitCode) {
+        singleInstanceServer.stop();
+        windowManager.destroyAllWindows();
+        QProcess retry;
+        retry.setProgram(application.applicationFilePath());
+        retry.setArguments(application.arguments().mid(1));
+        QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("QT_QUICK_BACKEND"), QStringLiteral("software"));
+        environment.insert(QStringLiteral("LICASA_SOFTWARE_RETRY"), QStringLiteral("1"));
+        retry.setProcessEnvironment(environment);
+        if (!retry.startDetached()) {
+            qCritical() << "[Licasa] Could not start the software renderer retry.";
+            return 1;
+        }
+        return 0;
+    }
     return exitCode;
 }

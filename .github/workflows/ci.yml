@@ -1,5 +1,6 @@
 name: Build and verify
 on:
+  pull_request:
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -23,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        preset: ${{ fromJSON(inputs.presets || '["release","asan","ubsan"]') }}
+        preset: ${{ fromJSON(inputs.presets || (github.event_name == 'pull_request' && '["release"]' || '["release","asan","ubsan"]')) }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -32,7 +33,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ca-certificates git cmake make ninja-build g++ python3 \
-            pkg-config patch meson nasm clang-format-18 binutils libjpeg-turbo8-dev libtiff-dev \
+            pkg-config patch meson nasm clang-format-18 binutils libjpeg-turbo8-dev libtiff-dev libpng-dev \
             libx11-dev libxext-dev \
             qt6-base-dev qt6-declarative-dev qt6-svg-dev qt6-image-formats-plugins \
             qt6-base-private-dev qt6-declarative-private-dev qt6-shadertools-dev \

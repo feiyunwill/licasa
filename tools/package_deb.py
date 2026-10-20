@@ -15,6 +15,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 QML_RUNTIME = (
     "libqt6svg6",
+    "qt6-wayland",
     "qml6-module-qtqml",
     "qml6-module-qtqml-models",
     "qml6-module-qtqml-workerscript",

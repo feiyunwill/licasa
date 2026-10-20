@@ -466,13 +466,21 @@ void WindowManager::registerWindow(QQuickWindow* window)
         [window]() { logWindowGraphicsBackend(window, QStringLiteral("sceneGraphInitialized")); },
         Qt::DirectConnection);
     connect(
+        window, &QQuickWindow::sceneGraphInitialized, this,
+        [this]() { graphicsInitialized_ = true; }, Qt::QueuedConnection);
+    connect(
         window, &QQuickWindow::sceneGraphInvalidated, window,
         []() { qInfo().noquote() << "[Licasa] Qt Quick scene graph invalidated"; },
         Qt::DirectConnection);
-    connect(window, &QQuickWindow::sceneGraphError, window,
-            [](QQuickWindow::SceneGraphError error, const QString& message) {
-                qWarning() << "[Licasa] Qt Quick scene graph error:" << error << message;
-            });
+    connect(
+        window, &QQuickWindow::sceneGraphError, this,
+        [this](QQuickWindow::SceneGraphError error, const QString& message) {
+            qWarning() << "[Licasa] Qt Quick scene graph error:" << error << message;
+            if (!graphicsInitialized_) {
+                emit initialGraphicsFailed(message);
+            }
+        },
+        Qt::QueuedConnection);
 
     windows_.append(QPointer<QQuickWindow>(window));
     connect(window, &QObject::destroyed, this, [this, window]() {

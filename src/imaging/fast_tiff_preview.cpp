@@ -2,6 +2,8 @@
 
 #include <QByteArray>
 #include <QColorSpace>
+#include <QDebug>
+#include <QElapsedTimer>
 #include <QFile>
 
 #include <tiffio.h>
@@ -51,6 +53,11 @@ QImage readFastTiffPreview(const QString& path, const QSize& requestedSize,
                            quint64 maximumOutputPixels, qsizetype maximumOutputBytes,
                            std::atomic_bool* cancelled)
 {
+    const bool tracing = qEnvironmentVariableIsSet("LICASA_TRACE_FAST_TIFF");
+    QElapsedTimer timer;
+    if (tracing) {
+        timer.start();
+    }
     if (maximumOutputBytes <= 0 || maximumOutputPixels == 0 ||
         (cancelled && cancelled->load(std::memory_order_relaxed))) {
         return {};
@@ -89,29 +96,60 @@ QImage readFastTiffPreview(const QString& path, const QSize& requestedSize,
         !TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLEFORMAT, &sampleFormat) || !width ||
         !height || width > uint32_t(std::numeric_limits<int>::max()) ||
         height > uint32_t(std::numeric_limits<int>::max()) ||
-        quint64(width) * quint64(height) > kMaximumSourcePixels || bits != 16 || samples != 1 ||
-        (photometric != PHOTOMETRIC_MINISBLACK && photometric != PHOTOMETRIC_MINISWHITE) ||
-        compression != COMPRESSION_NONE || planar != PLANARCONFIG_CONTIG ||
+        quint64(width) * quint64(height) > kMaximumSourcePixels || planar != PLANARCONFIG_CONTIG ||
         orientation != ORIENTATION_TOPLEFT || sampleFormat != SAMPLEFORMAT_UINT ||
         TIFFIsTiled(tiff.get())) {
         return {};
     }
 
+    const bool gray16 =
+        bits == 16 && samples == 1 &&
+        (photometric == PHOTOMETRIC_MINISBLACK || photometric == PHOTOMETRIC_MINISWHITE) &&
+        compression == COMPRESSION_NONE;
+    const bool rgb8 = bits == 8 && samples == 3 && photometric == PHOTOMETRIC_RGB;
+    const bool rgba8 = bits == 8 && samples == 4 && photometric == PHOTOMETRIC_RGB;
+    if (!gray16 && !rgb8 && !rgba8) {
+        return {};
+    }
+    if ((rgb8 || rgba8) && compression != COMPRESSION_NONE &&
+        compression != COMPRESSION_ADOBE_DEFLATE && compression != COMPRESSION_DEFLATE) {
+        return {};
+    }
+    if (rgba8) {
+        uint16_t extraCount = 0;
+        uint16_t* extraTypes = nullptr;
+        if (!TIFFGetField(tiff.get(), TIFFTAG_EXTRASAMPLES, &extraCount, &extraTypes) ||
+            extraCount != 1 || !extraTypes || extraTypes[0] != EXTRASAMPLE_UNASSALPHA) {
+            return {};
+        }
+    }
+
     const tmsize_t scanlineBytes = TIFFScanlineSize(tiff.get());
     const tmsize_t stripBytes = TIFFStripSize(tiff.get());
-    if (scanlineBytes < tmsize_t(quint64(width) * 2) || scanlineBytes > kMaximumScanlineBytes ||
-        stripBytes <= 0 || stripBytes > kMaximumStripBytes) {
+    uint32_t rowsPerStrip = 0;
+    if (!TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_ROWSPERSTRIP, &rowsPerStrip) ||
+        rowsPerStrip == 0) {
+        return {};
+    }
+    const int bytesPerPixel = gray16 ? 2 : int(samples);
+    if (scanlineBytes < tmsize_t(quint64(width) * quint64(bytesPerPixel)) ||
+        scanlineBytes > kMaximumScanlineBytes || stripBytes <= 0 ||
+        stripBytes > kMaximumStripBytes) {
         return {};
     }
 
-    const quint64 pixelLimit = std::min(maximumOutputPixels, quint64(maximumOutputBytes));
+    const int outputBytesPerPixel = gray16 ? 1 : bytesPerPixel;
+    const quint64 pixelLimit =
+        std::min(maximumOutputPixels, quint64(maximumOutputBytes) / quint64(outputBytesPerPixel));
     QSize target = outputSize(QSize(int(width), int(height)), requestedSize, pixelLimit);
     if (!target.isValid() || target.isEmpty()) {
         return {};
     }
     QImage image;
     while (target.width() > 0 && target.height() > 0) {
-        image = QImage(target, QImage::Format_Grayscale8);
+        image = QImage(target, gray16 ? QImage::Format_Grayscale8
+                               : rgb8 ? QImage::Format_RGB888
+                                      : QImage::Format_RGBA8888);
         if (!image.isNull() && image.sizeInBytes() <= maximumOutputBytes) {
             break;
         }
@@ -125,21 +163,51 @@ QImage readFastTiffPreview(const QString& path, const QSize& requestedSize,
         return {};
     }
 
-    std::vector<quint16> scanline(size_t((scanlineBytes + 1) / 2), quint16(0));
+    std::vector<quint16> grayScanline(gray16 ? size_t((scanlineBytes + 1) / 2) : 0);
+    std::vector<quint16> stripBuffer(gray16 ? 0 : size_t((stripBytes + 1) / 2));
+    tstrip_t loadedStrip = std::numeric_limits<tstrip_t>::max();
+    tmsize_t loadedBytes = 0;
     for (int y = 0; y < target.height(); ++y) {
         if (cancelled && cancelled->load(std::memory_order_relaxed)) {
             return {};
         }
         const uint32_t sourceY = uint32_t(quint64(y) * height / quint64(target.height()));
-        if (TIFFReadScanline(tiff.get(), scanline.data(), sourceY, 0) < 0) {
-            return {};
+        const uchar* sourceBytes = nullptr;
+        if (gray16) {
+            if (TIFFReadScanline(tiff.get(), grayScanline.data(), sourceY, 0) < 0) {
+                return {};
+            }
+            sourceBytes = reinterpret_cast<const uchar*>(grayScanline.data());
+        } else {
+            const tstrip_t strip = TIFFComputeStrip(tiff.get(), sourceY, 0);
+            if (strip != loadedStrip) {
+                loadedBytes =
+                    TIFFReadEncodedStrip(tiff.get(), strip, stripBuffer.data(), stripBytes);
+                if (loadedBytes < 0) {
+                    return {};
+                }
+                loadedStrip = strip;
+            }
+            const quint64 rowOffset = quint64(sourceY % rowsPerStrip) * quint64(scanlineBytes);
+            if (rowOffset > quint64(loadedBytes) ||
+                quint64(width) * quint64(bytesPerPixel) > quint64(loadedBytes) - rowOffset) {
+                return {};
+            }
+            sourceBytes = reinterpret_cast<const uchar*>(stripBuffer.data()) + rowOffset;
         }
         uchar* output = image.scanLine(y);
+        const auto* sourceGray = reinterpret_cast<const quint16*>(sourceBytes);
         for (int x = 0; x < target.width(); ++x) {
             const uint32_t sourceX = uint32_t(quint64(x) * width / quint64(target.width()));
-            const quint16 value = scanline[sourceX];
-            output[x] = uchar(
-                (photometric == PHOTOMETRIC_MINISWHITE ? quint16(65535 - value) : value) >> 8);
+            if (gray16) {
+                const quint16 value = sourceGray[sourceX];
+                output[x] = uchar(
+                    (photometric == PHOTOMETRIC_MINISWHITE ? quint16(65535 - value) : value) >> 8);
+            } else {
+                const int sourceOffset = int(sourceX) * bytesPerPixel;
+                const int outputOffset = x * bytesPerPixel;
+                std::copy_n(sourceBytes + sourceOffset, bytesPerPixel, output + outputOffset);
+            }
         }
     }
 
@@ -152,6 +220,11 @@ QImage readFastTiffPreview(const QString& path, const QSize& requestedSize,
         if (profile.isValid()) {
             image.setColorSpace(profile);
         }
+    }
+    if (tracing) {
+        qInfo().noquote() << "[Licasa] Fast TIFF preview:" << "source="
+                          << QSize(int(width), int(height)) << "output=" << image.size()
+                          << "elapsed_ms=" << double(timer.nsecsElapsed()) / 1000000.0;
     }
     return image;
 }

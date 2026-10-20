@@ -212,10 +212,11 @@ Window {
     property bool rawMetadataProbePending: false
     property url rawMetadataProbeUrl: ""
     property real rawMetadataProbeDurationMs: 0.0
+    property bool reusablePngBase: false
     readonly property real previewOverscanFactor: 1.20
     readonly property real previewTriggerRatio: 1.15
     readonly property int maxPreviewDecodeExtent: 8192
-    readonly property int fullResUpgradeDelayMs: isLargeTiff() || isLargeJpeg() ? 350 : 80
+    readonly property int fullResUpgradeDelayMs: isLargeTiff() ? 120 : (isLargeJpeg() ? 350 : 80)
 
     readonly property real maxWheelDeltaPerEvent: 120
 
@@ -619,6 +620,8 @@ Window {
                 && rawEmbeddedPreviewSize.height >= previewSourceHeight()
         if (extension === "tif" || extension === "tiff")
             return false
+        if (extension === "png" && reusablePngBase)
+            return false
         return true
     }
 
@@ -646,6 +649,7 @@ Window {
 
         const rawInfo = imageProbe.inspect(residentImageUrl)
         rawEmbeddedPreviewSize = rawInfo.previewSize || Qt.size(0, 0)
+        reusablePngBase = rawInfo.reusablePngBase === true
         const limited = rawInfo.withinBudget !== true
         if (limited === imageLimitedToPreview)
             return
@@ -1219,6 +1223,7 @@ Window {
         rawMetadataProbePending = false
         rawMetadataProbeUrl = ""
         rawMetadataProbeDurationMs = 0.0
+        reusablePngBase = false
         rawMetadataProbeTimer.stop()
         imageViewport.releaseStaticImages()
 
@@ -1326,6 +1331,7 @@ Window {
     function readImageMetadata(url, preserveRawStage) {
         const info = imageProbe.inspect(url)
         naturalImageSize = info.size || Qt.size(0, 0)
+        reusablePngBase = info.reusablePngBase === true
         rawPreviewFirst = info.previewFirst === true || (preserveRawStage && rawPreviewFirst)
         rawEmbeddedPreviewSize = info.previewSize || Qt.size(0, 0)
         if (!preserveRawStage) {
@@ -1395,6 +1401,11 @@ Window {
             windowManager.openInNewWindow(u)
             return
         }
+
+        // Scan the containing folder while the image decoder is working.
+        // The nearby-preview request waits for this index instead of scanning
+        // a large folder on the UI thread after the first frame appears.
+        formatSupport.prepareDirectoryIndex(u)
 
         const previousImageReady = imageViewport.imageStatus === Image.Ready
         const replacingLoadingImage = replaceCurrent === true
@@ -2026,6 +2037,15 @@ Window {
             if (root)
                 windowManager.destroyWindow(root)
         })
+    }
+
+    Connections {
+        target: root.formatSupport
+        function onDirectoryIndexReady() {
+            if (FileUrls.isLocal(root.residentImageUrl)
+                    && root.formatSupport.hasDirectoryIndex(root.residentImageUrl))
+                nearbyPreviewTimer.restart()
+        }
     }
 
     Connections {

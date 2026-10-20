@@ -99,6 +99,16 @@ class ViewerMeasurement final : public QObject, public DiagnosticCheck {
             }
             return;
         }
+        if (!imageUrl_.isEmpty() && result_.contains("full_detail_ready_ms") &&
+            !result_.contains("full_detail_presented_ms") &&
+            !window_->property("previewPhase").toBool() &&
+            viewport_->property("pendingImageSlot").toInt() < 0) {
+            const QString key = viewport_->property("activeRequestKey").toString();
+            if (key.contains(QStringLiteral("licasa_stage=full")) ||
+                key.contains(QStringLiteral("licasa_stage=raw-interactive"))) {
+                result_["full_detail_presented_ms"] = elapsed();
+            }
+        }
         if (settling_) {
             return;
         }

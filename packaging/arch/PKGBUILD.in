@@ -1,0 +1,36 @@
+# Maintainer: Sanxchep <https://github.com/sanxchep>
+pkgname=licasa-appimage
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Licasa image viewer, installed from its qualified AppImage without FUSE'
+arch=('x86_64')
+url='https://github.com/sanxchep/licasa'
+license=('BSD-2-Clause' 'BSD-3-Clause' 'LGPL-2.1-only' 'LGPL-3.0-or-later' 'MIT' 'Apache-2.0')
+depends=('bash' 'libx11' 'libxext' 'libxcb' 'libxkbcommon' 'fontconfig' 'harfbuzz' 'dbus' 'mesa' 'libglvnd')
+options=('!strip')
+_appimage="Licasa-${pkgver}-x86_64.AppImage"
+source_x86_64=("${_appimage}::${url}/releases/download/v${pkgver}/${_appimage}")
+sha256sums_x86_64=('@SHA256@')
+noextract=("${_appimage}")
+
+prepare() {
+    chmod +x "${srcdir}/${_appimage}"
+    (cd "${srcdir}" && "./${_appimage}" --appimage-extract >/dev/null)
+    test -f "${srcdir}/squashfs-root/AppRun"
+    test -f "${srcdir}/squashfs-root/usr/share/applications/licasa.desktop"
+    test -f "${srcdir}/squashfs-root/usr/share/icons/hicolor/512x512/apps/licasa.png"
+}
+
+package() {
+    install -dm755 "${pkgdir}/opt"
+    cp -a "${srcdir}/squashfs-root" "${pkgdir}/opt/licasa"
+    install -dm755 "${pkgdir}/usr/bin"
+    printf '#!/bin/sh\nexec /opt/licasa/AppRun "$@"\n' > "${pkgdir}/usr/bin/licasa"
+    chmod 755 "${pkgdir}/usr/bin/licasa"
+    install -Dm644 "${srcdir}/squashfs-root/usr/share/applications/licasa.desktop" \
+        "${pkgdir}/usr/share/applications/licasa.desktop"
+    install -Dm644 "${srcdir}/squashfs-root/usr/share/icons/hicolor/512x512/apps/licasa.png" \
+        "${pkgdir}/usr/share/icons/hicolor/512x512/apps/licasa.png"
+    install -Dm644 "${srcdir}/squashfs-root/usr/share/licenses/licasa/LICENSE" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

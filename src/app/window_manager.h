@@ -80,6 +80,7 @@ class WindowManager final : public QObject {
 
   signals:
     void navigationKeyReleased(QObject* window, int direction);
+    void initialGraphicsFailed(const QString& message);
 
   protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -97,6 +98,7 @@ class WindowManager final : public QObject {
     ImageSaveService* imageSaveService_ = nullptr;
     QList<QPointer<QQuickWindow>> windows_;
     QHash<QQuickWindow*, std::shared_ptr<WindowMediaState>> mediaStates_;
+    bool graphicsInitialized_ = false;
 };
 
 } // namespace Licasa

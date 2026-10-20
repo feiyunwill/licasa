@@ -4,6 +4,9 @@
 #include "imaging/image_edit_pipeline.h"
 #include "imaging/image_processing.h"
 #include "imaging/image_resource_policy.h"
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+#include "imaging/fast_png_preview.h"
+#endif
 #ifdef LICASA_HAVE_FAST_TIFF_PREVIEW
 #include "imaging/fast_tiff_preview.h"
 #endif
@@ -24,6 +27,7 @@
 #include <QWaitCondition>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <utility>
 
@@ -113,6 +117,7 @@ struct DecodedImageCache {
     bool fullDetail = false;
     bool rawFastDevelopment = false;
     QImage image;
+    quint64 hitCount = 0;
 
     bool matchesFile(const QFileInfo& file, int megapixels) const
     {
@@ -132,6 +137,7 @@ struct DecodedImageCache {
         QMutexLocker lock(&mutex);
         if (matchesFile(file, megapixels) && requestedSize == normalizedRequestedSize(requested) &&
             fullDetail == full && rawFastDevelopment == rawFast) {
+            ++hitCount;
             return image;
         }
         return {};
@@ -402,7 +408,8 @@ struct ParallelDecodePair {
 };
 
 namespace {
-constexpr qsizetype kMaximumDecodedBaseCacheBytes = 256 * 1024 * 1024;
+constexpr qsizetype kMaximumDecodedBaseCacheBytes =
+    qsizetype(ImageDecodeContract::maximumDecodedBaseCacheBytes);
 
 bool traceDecodeCache() { return qEnvironmentVariableIsSet("LICASA_TRACE_DECODE_CACHE"); }
 QSize boundedPreviewSize(const QSize& requestedSize, quint64 maximumPixels)
@@ -495,6 +502,9 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
           discardFailedPreview_(std::move(discardFailedPreview)), cancelled_(std::move(cancelled)),
           priorityNavigationPreview_(priorityNavigationPreview)
     {
+        if (traceDecodePhases()) {
+            queuedAt_ = Clock::now();
+        }
         setAutoDelete(false);
     }
 
@@ -509,6 +519,14 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
 
     void run() override
     {
+        const bool tracing = traceDecodePhases();
+        const auto startedAt = tracing ? Clock::now() : Clock::time_point{};
+        Clock::duration gateWait{};
+        const auto recordGateWait = [&](Clock::time_point waitingAt) {
+            if (tracing) {
+                gateWait += Clock::now() - waitingAt;
+            }
+        };
         const bool priorityPreviewReady =
             !isCancelled() && priorityNavigationPreview_ && tryPriorityPreview();
         if (parallelPreview_ && parallelPair_) {
@@ -527,7 +545,9 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                 // this preview ends, including its decode-cache publication.
                 decodeImage(pairedMaximumMegapixels);
             } else if (!priorityPreviewReady && !isCancelled()) {
+                const auto waitingAt = tracing ? Clock::now() : Clock::time_point{};
                 QMutexLocker processingLock(&resourcePolicy_.processingMutex());
+                recordGateWait(waitingAt);
                 if (!isCancelled()) {
                     decodeImage(resourcePolicy_.prepareForProcessing());
                 }
@@ -542,7 +562,9 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
             // A bounded selected preview can be shown while the cancelled old
             // full reader is still retiring from LibRaw.
         } else if (!isCancelled() && speculativeFull_ && parallelPair_) {
+            const auto waitingAt = tracing ? Clock::now() : Clock::time_point{};
             QMutexLocker processingLock(&resourcePolicy_.processingMutex());
+            recordGateWait(waitingAt);
             const int maximumMegapixels = resourcePolicy_.prepareForProcessing();
             {
                 QMutexLocker pairLock(&parallelPair_->mutex);
@@ -556,7 +578,9 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                 parallelPair_->previewFinishedCondition.wait(&parallelPair_->mutex);
             }
         } else if (!isCancelled()) {
+            const auto waitingAt = tracing ? Clock::now() : Clock::time_point{};
             QMutexLocker processingLock(&resourcePolicy_.processingMutex());
+            recordGateWait(waitingAt);
             if (!isCancelled()) {
                 decodeImage(resourcePolicy_.prepareForProcessing());
             }
@@ -568,6 +592,25 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
         if (discardFailedPreview_ && (isCancelled() || !error_.isEmpty())) {
             parallelPair_->previewPresented.store(true, std::memory_order_release);
             discardFailedPreview_();
+        }
+        if (tracing) {
+            const auto finishedAt = Clock::now();
+            const auto milliseconds = [](Clock::duration duration) {
+                return std::chrono::duration<double, std::milli>(duration).count();
+            };
+            const char* stage = priorityNavigationPreview_   ? "navigation-preview"
+                                : parallelPreview_           ? "parallel-preview"
+                                : speculativeFull_           ? "speculative-full"
+                                : rawFastDevelopment_        ? "raw-fast"
+                                : rawInteractiveDevelopment_ ? "raw-interactive"
+                                : fullDetail_                ? "full"
+                                                             : "preview";
+            qInfo().noquote() << "[Licasa] Decode phases:" << stage
+                              << "queue_ms=" << milliseconds(startedAt - queuedAt_)
+                              << "gate_ms=" << milliseconds(gateWait)
+                              << "worker_ms=" << milliseconds(finishedAt - startedAt)
+                              << "cancelled=" << isCancelled() << "error=" << !error_.isEmpty()
+                              << "output=" << image_.size();
         }
         emit finished();
         if (prewarm) {
@@ -584,6 +627,14 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
     }
 
   private:
+    using Clock = std::chrono::steady_clock;
+
+    static bool traceDecodePhases()
+    {
+        static const bool enabled = qEnvironmentVariableIsSet("LICASA_TRACE_DECODE_PHASES");
+        return enabled;
+    }
+
     bool tryPriorityPreview()
     {
         // Prepared neighbors are already charged to the bounded nearby cache.
@@ -700,6 +751,14 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
             QImageReader reader(filePath_);
             ImageDecodeContract::configure(reader, maximumPixels, cancelled_.get(), fullDetail_,
                                            rawFastDevelopment_, rawInteractiveDevelopment_);
+            const QString suffix = fileInfo.suffix().toLower();
+            const bool retainDecodedFullBase =
+                !fullDetail_ && !parallelPreview_ && !rawFastDevelopment_ &&
+                (suffix == QStringLiteral("heic") || suffix == QStringLiteral("heif") ||
+                 suffix == QStringLiteral("hif") || suffix == QStringLiteral("jxl"));
+            if (retainDecodedFullBase && reader.device()) {
+                reader.device()->setProperty(ImageDecodeContract::retainFullBaseProperty, true);
+            }
             if (speculativeFull_ && parallelPair_ && reader.device()) {
                 reader.device()->setProperty(ImageDecodeContract::previewPresentedProperty,
                                              QVariant::fromValue(reinterpret_cast<quintptr>(
@@ -734,6 +793,24 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                 return;
             }
 
+            const bool qtReusePngBase =
+                !fullDetail_ && !parallelPreview_ && !rawFastDevelopment_ &&
+                !rawInteractiveDevelopment_ && suffix == QStringLiteral("png") &&
+                reader.scaledSize().isValid() &&
+                reader.transformation() == QImageIOHandler::TransformationNone &&
+                (!reader.supportsAnimation() || reader.imageCount() == 1) &&
+                ImageDecodeContract::reusablePngFullBase(reader.size(), reader.imageFormat(),
+                                                         maximumPixels);
+            bool fastPngBase = false;
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+            fastPngBase = !fullDetail_ && !parallelPreview_ && !rawFastDevelopment_ &&
+                          !rawInteractiveDevelopment_ && suffix == QStringLiteral("png") &&
+                          reader.scaledSize().isValid() &&
+                          reader.transformation() == QImageIOHandler::TransformationNone &&
+                          ImageDecodeContract::boundedPngFullBase(reader.size(), maximumPixels) &&
+                          fastPngBaseEligible(filePath_, maximumPixels);
+#endif
+
 #ifdef LICASA_EARLY_PROGRESSIVE_JPEG
             const QString extension = fileInfo.suffix().toLower();
             if (!fullDetail_ && !rawFastDevelopment_ && !rawInteractiveDevelopment_ &&
@@ -743,7 +820,54 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                                                         maximumPixels, cancelled_.get());
             }
 #endif
-            if (image.isNull()) {
+            if (image.isNull() && fastPngBase) {
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+                FastPngPreview decoded =
+                    readFastPngPreview(filePath_, reader.scaledSize(), maximumPixels,
+                                       8 * 1024 * 1024, cancelled_.get());
+                if (!decoded.preview.isNull() && !decoded.fullBase.isNull() && !isCancelled()) {
+                    image = std::move(decoded.preview);
+                    const bool stored = decodedImageCache_->store(
+                        fileInfo, QSize(), maximumMegapixels, true, false, decoded.fullBase);
+                    if (traceDecodeCache() && stored) {
+                        qInfo().noquote()
+                            << QStringLiteral("[Licasa] Decoded full PNG base retained from "
+                                              "fast preview: %1 MiB (%2x%3)")
+                                   .arg(double(decoded.fullBase.sizeInBytes()) / (1024.0 * 1024.0),
+                                        0, 'f', 1)
+                                   .arg(decoded.fullBase.width())
+                                   .arg(decoded.fullBase.height());
+                    }
+                }
+#endif
+            }
+            if (image.isNull() && (qtReusePngBase || fastPngBase)) {
+                const QSize previewSize = reader.scaledSize();
+                const QSize sourceSize = reader.size();
+                reader.setScaledSize(QSize());
+                QImage fullBase = reader.read();
+                if (!fullBase.isNull() && !isCancelled()) {
+                    if (!fullBase.colorSpace().isValid()) {
+                        fullBase.setColorSpace(QColorSpace::SRgb);
+                    }
+                    image = fullBase.scaled(previewSize, Qt::IgnoreAspectRatio,
+                                            Qt::SmoothTransformation);
+                    if (!image.isNull() && fullBase.size() == sourceSize &&
+                        fullBase.sizeInBytes() <= kMaximumDecodedBaseCacheBytes) {
+                        const bool stored = decodedImageCache_->store(
+                            fileInfo, QSize(), maximumMegapixels, true, false, fullBase);
+                        if (traceDecodeCache() && stored) {
+                            qInfo().noquote()
+                                << QStringLiteral("[Licasa] Decoded full PNG base retained from "
+                                                  "preview: %1 MiB (%2x%3)")
+                                       .arg(double(fullBase.sizeInBytes()) / (1024.0 * 1024.0), 0,
+                                            'f', 1)
+                                       .arg(fullBase.width())
+                                       .arg(fullBase.height());
+                        }
+                    }
+                }
+            } else if (image.isNull()) {
                 image = reader.read();
             }
             if (isCancelled()) {
@@ -753,10 +877,37 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                 error_ = ImageProcessing::readerErrorOrFallback(reader);
                 return;
             }
+            // Unprofiled PNG pixels are treated as sRGB by the display path.
+            // Tag before cache publication, while the raster is still owned
+            // here, so a later full/edit request does not detach a huge copy.
+            if (suffix == QStringLiteral("png") && !image.colorSpace().isValid()) {
+                image.setColorSpace(QColorSpace::SRgb);
+            }
             if (!ImageDecodeContract::allows(image.size(), maximumPixels)) {
                 image = {};
                 error_ = ImageProcessing::imageLimitError(maximumMegapixels);
                 return;
+            }
+            if (retainDecodedFullBase && reader.device()) {
+                const QImage fullBase = reader.device()
+                                            ->property(ImageDecodeContract::decodedFullBaseProperty)
+                                            .value<QImage>();
+                if (!fullBase.isNull() && fullBase.sizeInBytes() > 0 &&
+                    fullBase.sizeInBytes() <= kMaximumDecodedBaseCacheBytes &&
+                    ImageDecodeContract::allows(fullBase.size(), maximumPixels) &&
+                    fullBase.size() == reader.size()) {
+                    const bool stored = decodedImageCache_->store(
+                        fileInfo, QSize(), maximumMegapixels, true, false, fullBase);
+                    if (traceDecodeCache() && stored) {
+                        qInfo().noquote()
+                            << QStringLiteral("[Licasa] Decoded full base retained from preview: "
+                                              "%1 MiB (%2x%3)")
+                                   .arg(double(fullBase.sizeInBytes()) / (1024.0 * 1024.0), 0, 'f',
+                                        1)
+                                   .arg(fullBase.width())
+                                   .arg(fullBase.height());
+                    }
+                }
             }
             // Cache by retained bytes, not megapixels. Camera RAWs commonly
             // exceed 16 MP while their decoded RGB8 base raster is still a
@@ -882,6 +1033,7 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
     QString error_;
     std::shared_ptr<std::atomic_bool> cancelled_;
     bool priorityNavigationPreview_ = false;
+    Clock::time_point queuedAt_;
 };
 
 } // namespace
@@ -988,6 +1140,12 @@ quint64 AsyncImageProvider::nearbyPreviewHitCount() const
 {
     QMutexLocker lock(&nearbyPreviewCache_->mutex);
     return nearbyPreviewCache_->hitCount;
+}
+
+quint64 AsyncImageProvider::decodedBaseCacheHitCount() const
+{
+    QMutexLocker lock(&decodedImageCache_->mutex);
+    return decodedImageCache_->hitCount;
 }
 
 bool AsyncImageProvider::hasNearbyPreview(const QUrl& url) const

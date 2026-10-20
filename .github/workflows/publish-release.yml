@@ -117,6 +117,9 @@ jobs:
           test "$(dpkg-deb --field "dist/deb/licasa_${VERSION}-1_amd64.deb" Version)" = "${VERSION}-1"
           (cd dist/appimage && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256")
           (cd dist/appimage && sha256sum --check install-licasa-appimage.sh.sha256)
+          (cd dist/rpm && sha256sum --check "licasa-appimage-${VERSION}-1.fc44.x86_64.rpm.sha256")
+          (cd dist/arch && sha256sum --check "licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256")
+          (cd dist/arch && sha256sum --check PKGBUILD.sha256)
           (cd dist/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
           source_commit="$(unsquashfs -cat "dist/snap/licasa_${VERSION}_amd64.snap" \
             usr/share/licasa/source-commit)"
@@ -223,6 +226,9 @@ jobs:
           (cd dist/deb && sha256sum --check "licasa_${VERSION}-1_amd64.deb.sha256")
           (cd dist/appimage && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256")
           (cd dist/appimage && sha256sum --check install-licasa-appimage.sh.sha256)
+          (cd dist/rpm && sha256sum --check "licasa-appimage-${VERSION}-1.fc44.x86_64.rpm.sha256")
+          (cd dist/arch && sha256sum --check "licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256")
+          (cd dist/arch && sha256sum --check PKGBUILD.sha256)
           (cd dist/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
       - name: Mark the checked GitHub prerelease as Latest
         env:
@@ -239,6 +245,9 @@ jobs:
             cat "dist/deb/licasa_${VERSION}-1_amd64.deb.sha256"
             cat "dist/appimage/Licasa-${VERSION}-x86_64.AppImage.sha256"
             cat "dist/appimage/install-licasa-appimage.sh.sha256"
+            cat "dist/rpm/licasa-appimage-${VERSION}-1.fc44.x86_64.rpm.sha256"
+            cat "dist/arch/licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256"
+            cat "dist/arch/PKGBUILD.sha256"
             cat "dist/snap/licasa_${VERSION}_amd64.snap.sha256"
             printf "\`\`\`\n"
             printf "\nSnap beta revision: %s.\n" "$SNAP_REVISION"

@@ -432,6 +432,7 @@ class HeifPluginTest final : public QObject {
     {
         QImageReader reader(fixture("grid-48mp-preview.heic"));
         Contract::configure(reader, policy_->maximumImagePixels());
+        reader.device()->setProperty(Contract::retainFullBaseProperty, true);
         reader.setScaledSize(QSize(1200, 900));
         const auto image = reader.read();
         QVERIFY2(!image.isNull(), qPrintable(codecError(reader)));
@@ -441,17 +442,20 @@ class HeifPluginTest final : public QObject {
                  QSize(1600, 1200));
         QCOMPARE(reader.device()->property("_licasaNativeRasterPixels").toULongLong(),
                  quint64(1600 * 1200));
+        QVERIFY(!reader.device()->property(Contract::decodedFullBaseProperty).isValid());
     }
 
     void singleCodedImageUsesAuthoritativePixelLimit()
     {
         QImageReader preview(fixture("single-48mp.heic"));
         Contract::configure(preview, policy_->maximumImagePixels());
+        preview.device()->setProperty(Contract::retainFullBaseProperty, true);
         QCOMPARE(preview.size(), QSize(8000, 6000));
         preview.setScaledSize(QSize(1200, 900));
         QVERIFY(preview.read().isNull());
         QVERIFY(codecError(preview).contains("limit"));
         QVERIFY(!preview.device()->property("_licasaNativeRasterPixels").isValid());
+        QVERIFY(!preview.device()->property(Contract::decodedFullBaseProperty).isValid());
         QImageReader full(fixture("single-48mp.heic"));
         Contract::configure(full, policy_->maximumImagePixels());
         QVERIFY(full.read().isNull()); // 48 MP still exceeds the selected 25 MP.
@@ -581,6 +585,68 @@ class HeifPluginTest final : public QObject {
         QCOMPARE(retained, copy);
         retained = {};
         QVERIFY(!copy.isNull());
+    }
+
+    void scaledSingleImageOffersReusableFullBaseOnlyWhenRequested()
+    {
+        const QString path = fixture("with-alpha-512x512.heic");
+        QImageReader full(path);
+        Contract::configure(full, policy_->maximumImagePixels());
+        const QImage expected = full.read();
+        QVERIFY(!expected.isNull());
+
+        QImage retained;
+        {
+            QImageReader preview(path);
+            Contract::configure(preview, policy_->maximumImagePixels());
+            preview.device()->setProperty(Contract::retainFullBaseProperty, true);
+            preview.setScaledSize(QSize(128, 128));
+            const QImage scaled = preview.read();
+            QCOMPARE(scaled.size(), QSize(128, 128));
+            retained =
+                preview.device()->property(Contract::decodedFullBaseProperty).value<QImage>();
+        }
+        QCOMPARE(retained, expected);
+
+        QImageReader ordinary(path);
+        Contract::configure(ordinary, policy_->maximumImagePixels());
+        ordinary.setScaledSize(QSize(128, 128));
+        QVERIFY(!ordinary.read().isNull());
+        QVERIFY(!ordinary.device()->property(Contract::decodedFullBaseProperty).isValid());
+    }
+
+    void providerPromotesScaledSingleImageWithoutSecondDecode()
+    {
+        const QString path = fixture("with-alpha-512x512.heic");
+        const QString request =
+            QStringLiteral("1/") + QString::fromLatin1(QUrl::toPercentEncoding(path));
+        Licasa::AsyncImageProvider provider(*policy_);
+
+        std::unique_ptr<QQuickImageResponse> preview(provider.requestImageResponse(
+            request + QStringLiteral("?licasa_stage=preview"), QSize(128, 128)));
+        provider.waitForPendingWork();
+        QVERIFY2(preview->errorString().isEmpty(), qPrintable(preview->errorString()));
+        std::unique_ptr<QQuickTextureFactory> previewTexture(preview->textureFactory());
+        QVERIFY(previewTexture);
+        QCOMPARE(previewTexture->textureSize(), QSize(128, 128));
+
+        std::unique_ptr<QQuickImageResponse> full(
+            provider.requestImageResponse(request + QStringLiteral("?licasa_stage=full"), QSize()));
+        provider.waitForPendingWork();
+        QVERIFY2(full->errorString().isEmpty(), qPrintable(full->errorString()));
+        std::unique_ptr<QQuickTextureFactory> fullTexture(full->textureFactory());
+        QVERIFY(fullTexture);
+        QCOMPARE(fullTexture->textureSize(), QSize(512, 512));
+        QCOMPARE(provider.decodedBaseCacheHitCount(), quint64(1));
+
+        Licasa::AsyncImageProvider uncached(*policy_);
+        std::unique_ptr<QQuickImageResponse> direct(
+            uncached.requestImageResponse(request + QStringLiteral("?licasa_stage=full"), QSize()));
+        uncached.waitForPendingWork();
+        QVERIFY2(direct->errorString().isEmpty(), qPrintable(direct->errorString()));
+        std::unique_ptr<QQuickTextureFactory> directTexture(direct->textureFactory());
+        QVERIFY(directTexture);
+        QCOMPARE(fullTexture->image(), directTexture->image());
     }
 
     void malformedInputs()

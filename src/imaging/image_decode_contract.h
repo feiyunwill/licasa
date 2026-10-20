@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QIODevice>
+#include <QImage>
 #include <QImageReader>
 #include <QSize>
 #include <QVariant>
@@ -12,6 +13,30 @@
 // application policy. Values are set once, before handing the reader to a
 // worker/handler, and are never taken from file metadata.
 namespace Licasa::ImageDecodeContract {
+inline constexpr quint64 maximumDecodedBaseCacheBytes = 256ULL * 1024 * 1024;
+
+inline bool boundedPngFullBase(const QSize& size, quint64 maximumPixels) noexcept
+{
+    if (size.width() <= 0 || size.height() <= 0) {
+        return false;
+    }
+    const quint64 pixels = quint64(size.width()) * quint64(size.height());
+    return pixels >= 25000000 && pixels <= maximumPixels &&
+           pixels <= maximumDecodedBaseCacheBytes / 4;
+}
+
+inline bool reusablePngFullBase(const QSize& size, QImage::Format format,
+                                quint64 maximumPixels) noexcept
+{
+    if (format != QImage::Format_ARGB32 && format != QImage::Format_RGB32) {
+        return false;
+    }
+    const quint64 pixels = quint64(size.width()) * quint64(size.height());
+    // When the image fits half the pixel budget, paired preview/full reads
+    // can overlap and are faster than waiting for a retained preview base.
+    return boundedPngFullBase(size, maximumPixels) && pixels > maximumPixels / 2;
+}
+
 inline constexpr char pixelBudgetProperty[] = "_licasaPixelBudget";
 inline constexpr char cancellationProperty[] = "_licasaCancellation";
 inline constexpr char errorProperty[] = "_licasaCodecError";
@@ -24,6 +49,10 @@ inline constexpr char embeddedPreviewSizeProperty[] = "_licasaEmbeddedPreviewSiz
 // A RAW plugin may admit an oversized embedded JPEG only through native,
 // bounded JPEG scaling; this flag lets the selected-preview worker use it.
 inline constexpr char scalableEmbeddedJpegProperty[] = "_licasaScalableEmbeddedJpeg";
+// A single-image decoder that must materialize the full raster for a scaled
+// preview can offer that immutable base to the provider's bounded edit cache.
+inline constexpr char retainFullBaseProperty[] = "_licasaRetainFullBase";
+inline constexpr char decodedFullBaseProperty[] = "_licasaDecodedFullBase";
 inline constexpr char previewPresentedProperty[] = "_licasaPreviewPresented";
 // Metadata-only HEIF Exif exposure is opt-in. Ordinary HEIC/HEIF probing keeps
 // this false unless a same-basename Apple MOV candidate exists.

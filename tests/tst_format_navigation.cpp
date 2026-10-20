@@ -11,6 +11,7 @@ class FormatNavigationTest final : public QObject {
     void browsesReadableImagesInFilenameOrder();
     void handlesLargeDirectoriesAndMissingCurrentFile();
     void keepsFiveNeighborsOnEitherSide();
+    void preparesDirectoryIndexInBackground();
 };
 
 void FormatNavigationTest::browsesReadableImagesInFilenameOrder()
@@ -93,6 +94,32 @@ void FormatNavigationTest::keepsFiveNeighborsOnEitherSide()
     QVERIFY(!aroundEight.contains(image(2)));
     QVERIFY(aroundEight.contains(image(13)));
     QCOMPARE(formats.adjacentImage(image(15), 1), image(0));
+}
+
+void FormatNavigationTest::preparesDirectoryIndexInBackground()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    for (int index = 0; index < 3000; ++index) {
+        QFile file(
+            directory.filePath(QStringLiteral("image-%1.png").arg(index, 4, 10, QLatin1Char('0'))));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+    }
+    const auto image = [&directory](int index) {
+        return QUrl::fromLocalFile(
+            directory.filePath(QStringLiteral("image-%1.png").arg(index, 4, 10, QLatin1Char('0'))));
+    };
+
+    Licasa::FormatSupport formats;
+    QSignalSpy ready(&formats, &Licasa::FormatSupport::directoryIndexReady);
+    QVERIFY(!formats.hasDirectoryIndex(image(1500)));
+    formats.prepareDirectoryIndex(image(1500));
+    // A user can still navigate while the worker is building the cache.
+    QCOMPARE(formats.adjacentImage(image(1500), 1), image(1501));
+    QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 5000);
+    QVERIFY(formats.hasDirectoryIndex(image(1500)));
+    const QList<QUrl> nearby = formats.nearbyImages(image(1500), 2);
+    QCOMPARE(nearby, (QList<QUrl>{image(1501), image(1499), image(1502), image(1498)}));
 }
 
 QTEST_GUILESS_MAIN(FormatNavigationTest)

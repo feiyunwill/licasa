@@ -764,6 +764,14 @@ class HeifHandler final : public QImageIOHandler {
         if (image.isNull()) {
             return fail("HEIF returned invalid pixel dimensions or stride.");
         }
+        if (target != native && handle == handle_.get() && device() &&
+            device()->property(Contract::retainFullBaseProperty).toBool() &&
+            image.sizeInBytes() > 0 && image.sizeInBytes() <= 256 * 1024 * 1024) {
+            // libde265 has already produced the full raster. Share it with the
+            // provider before scaling the preview so full-detail promotion
+            // does not decode the same HEIF a second time.
+            device()->setProperty(Contract::decodedFullBaseProperty, QVariant::fromValue(image));
+        }
         if (image.size() != target) {
             image = image.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
         }

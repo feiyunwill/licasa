@@ -25,6 +25,7 @@
 #include <QPluginLoader>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
+#include <QTimer>
 #include <QUrl>
 
 #include <memory>
@@ -226,6 +227,12 @@ int main(int argc, char** argv)
         {"backgroundModeManager", QVariant::fromValue(static_cast<QObject*>(&background))},
         {"viewerPreferences", QVariant::fromValue(static_cast<QObject*>(&preferences))}};
     Licasa::WindowManager windows(&engine, properties);
+    QObject::connect(&windows, &Licasa::WindowManager::initialGraphicsFailed, &application,
+                     [&application](const QString& message) {
+                         qWarning().noquote()
+                             << "[Licasa] Diagnostic graphics initialization failed:" << message;
+                         QTimer::singleShot(0, &application, []() { QCoreApplication::exit(43); });
+                     });
     windows.setMotionPhotoResourcePolicy(&policy);
     windows.setImageResourcePolicy(&policy);
     windows.setImageProvider(decodeProvider);

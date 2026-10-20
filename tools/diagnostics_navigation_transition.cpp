@@ -127,7 +127,21 @@ class NavigationTransitionCheck final : public QObject, public DiagnosticCheck {
                     !window_->property("displayedFileName").toString().isEmpty() &&
                     (pending.contains(QStringLiteral("licasa_stage=full")) ||
                      pending.contains(QStringLiteral("licasa_stage=raw-interactive")))) {
-                    startNavigation();
+                    if (!fullPendingNs_) {
+                        fullPendingNs_ = monotonicNs();
+                    } else if (monotonicNs() - fullPendingNs_ >= 100000000) {
+                        result_["full_pending_before_navigation_ms"] =
+                            (monotonicNs() - fullPendingNs_) / 1e6;
+                        startNavigation();
+                    }
+                } else if (fullPendingNs_ && viewport_->property("pendingImageSlot").toInt() < 0 &&
+                           viewport_->property("imageStatus").toInt() == 1) {
+                    result_["full_pending_before_completion_ms"] =
+                        (monotonicNs() - fullPendingNs_) / 1e6;
+                    finish(QStringLiteral("Full request completed before the 100 ms navigation "
+                                          "window"));
+                } else {
+                    fullPendingNs_ = 0;
                 }
                 return;
             }
@@ -226,6 +240,7 @@ class NavigationTransitionCheck final : public QObject, public DiagnosticCheck {
     qint64 firstReadyNs_ = 0;
     qint64 firstPixelsNs_ = 0;
     qint64 navigationStartedNs_ = 0;
+    qint64 fullPendingNs_ = 0;
     double oldWidth_ = 0;
     double oldHeight_ = 0;
     double oldScale_ = 0;

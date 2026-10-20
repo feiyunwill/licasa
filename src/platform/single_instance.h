@@ -25,6 +25,7 @@ class SingleInstanceServer final : public QObject {
     explicit SingleInstanceServer(WindowManager* windowManager, QObject* parent = nullptr);
 
     bool start();
+    void stop();
 
   private slots:
     void acceptPendingConnections();

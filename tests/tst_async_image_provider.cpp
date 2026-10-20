@@ -5,7 +5,12 @@
 #include "imaging/fast_tiff_preview.h"
 #include <tiffio.h>
 #endif
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+#include "imaging/fast_png_preview.h"
+#include <png.h>
+#endif
 
+#include <QColorSpace>
 #include <QFile>
 #include <QImage>
 #include <QQuickTextureFactory>
@@ -18,9 +23,67 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <memory>
 #include <thread>
 #include <vector>
+
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+namespace {
+bool writePlainLargePng(const QString& path, bool alpha)
+{
+    const QByteArray encoded = QFile::encodeName(path);
+    FILE* file = std::fopen(encoded.constData(), "wb");
+    if (!file) {
+        return false;
+    }
+    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    png_infop info = png ? png_create_info_struct(png) : nullptr;
+    if (!info) {
+        if (png) {
+            png_destroy_write_struct(&png, nullptr);
+        }
+        std::fclose(file);
+        return false;
+    }
+    std::vector<uchar> row(size_t(5000) * (alpha ? 4 : 3));
+    if (setjmp(png_jmpbuf(png))) {
+        png_destroy_write_struct(&png, &info);
+        std::fclose(file);
+        return false;
+    }
+    png_init_io(png, file);
+    png_set_compression_level(png, 1);
+    png_set_IHDR(png, info, 5000, 5000, 8, alpha ? PNG_COLOR_TYPE_RGBA : PNG_COLOR_TYPE_RGB,
+                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+    png_write_info(png, info);
+    const int channels = alpha ? 4 : 3;
+    for (int x = 0; x < 5000; ++x) {
+        row[size_t(x) * channels] = 30;
+        row[size_t(x) * channels + 1] = 80;
+        row[size_t(x) * channels + 2] = 140;
+        if (alpha) {
+            row[size_t(x) * channels + 3] = 255;
+        }
+    }
+    for (int y = 0; y < 5000; ++y) {
+        if (y == 2500) {
+            row[size_t(2500) * channels] = 210;
+            row[size_t(2500) * channels + 1] = 40;
+            row[size_t(2500) * channels + 2] = 90;
+            if (alpha) {
+                row[size_t(2500) * channels + 3] = 120;
+            }
+        }
+        png_write_row(png, row.data());
+    }
+    png_write_end(png, info);
+    png_destroy_write_struct(&png, &info);
+    return std::fclose(file) == 0;
+}
+} // namespace
+#endif
 
 class AsyncImageProviderTest final : public QObject {
     Q_OBJECT
@@ -71,6 +134,66 @@ class AsyncImageProviderTest final : public QObject {
         QVERIFY(Licasa::readFastTiffPreview(path, QSize(1200, 900), 100000, 100000, &cancelled)
                     .isNull());
     }
+    void deflateRgbTiffPreviewKeepsPixelsAndBudget()
+    {
+        QTemporaryDir images;
+        QVERIFY(images.isValid());
+        constexpr uint32_t width = 1024;
+        constexpr uint32_t height = 768;
+        for (const uint16_t samples : {uint16_t(3), uint16_t(4)}) {
+            const QString path = images.filePath(QStringLiteral("rgb-%1.tif").arg(samples));
+            TIFF* tiff = TIFFOpen(QFile::encodeName(path).constData(), "w");
+            QVERIFY(tiff != nullptr);
+            TIFFSetField(tiff, TIFFTAG_IMAGEWIDTH, width);
+            TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, height);
+            TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, 8);
+            TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, samples);
+            TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+            TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_ADOBE_DEFLATE);
+            if (samples == 3) {
+                TIFFSetField(tiff, TIFFTAG_PREDICTOR, 2);
+            }
+            TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            TIFFSetField(tiff, TIFFTAG_ROWSPERSTRIP, 3);
+            TIFFSetField(tiff, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+            if (samples == 4) {
+                uint16_t extra = EXTRASAMPLE_UNASSALPHA;
+                TIFFSetField(tiff, TIFFTAG_EXTRASAMPLES, 1, &extra);
+            }
+            std::vector<uchar> row(size_t(width) * samples);
+            for (uint32_t y = 0; y < height; ++y) {
+                for (uint32_t x = 0; x < width; ++x) {
+                    row[size_t(x) * samples] = uchar(x % 256);
+                    row[size_t(x) * samples + 1] = uchar(y % 256);
+                    row[size_t(x) * samples + 2] = uchar((x + y) % 256);
+                    if (samples == 4) {
+                        row[size_t(x) * samples + 3] = uchar((x * 3 + y) % 256);
+                    }
+                }
+                QCOMPARE(TIFFWriteScanline(tiff, row.data(), y), 1);
+            }
+            TIFFClose(tiff);
+
+            std::atomic_bool cancelled{false};
+            const QImage preview =
+                Licasa::readFastTiffPreview(path, QSize(320, 240), 80000, 320000, &cancelled);
+            QVERIFY(!preview.isNull());
+            QCOMPARE(preview.size(), QSize(320, 240));
+            QVERIFY(preview.sizeInBytes() <= 320000);
+            for (const QPoint point : {QPoint(0, 0), QPoint(159, 119), QPoint(319, 239)}) {
+                const int sourceX = int(quint64(point.x()) * width / quint64(preview.width()));
+                const int sourceY = int(quint64(point.y()) * height / quint64(preview.height()));
+                const QColor color = preview.pixelColor(point);
+                QCOMPARE(color.red(), sourceX % 256);
+                QCOMPARE(color.green(), sourceY % 256);
+                QCOMPARE(color.blue(), (sourceX + sourceY) % 256);
+                QCOMPARE(color.alpha(), samples == 4 ? (sourceX * 3 + sourceY) % 256 : 255);
+            }
+            cancelled.store(true);
+            QVERIFY(Licasa::readFastTiffPreview(path, QSize(320, 240), 80000, 320000, &cancelled)
+                        .isNull());
+        }
+    }
 #endif
 
     void nearbyPreviewPreparesWhileFullDecoderOwnsGate()
@@ -99,6 +222,94 @@ class AsyncImageProviderTest final : public QObject {
         provider.waitForPendingWork();
         QVERIFY(provider.nearbyPreviewBytes() <= 48 * 1024 * 1024);
     }
+
+    void largePngPreviewReusesItsDecodedFullBase()
+    {
+        QTemporaryDir settings;
+        QTemporaryDir images;
+        QVERIFY(settings.isValid());
+        QVERIFY(images.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        Licasa::ViewerPreferences preferences;
+        preferences.setMaximumImageMegapixels(40);
+        Licasa::ImageResourcePolicy policy(preferences);
+        Licasa::AsyncImageProvider provider(policy);
+        const QString path = images.filePath(QStringLiteral("large.png"));
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+        QVERIFY(writePlainLargePng(path, true));
+        QVERIFY(Licasa::fastPngBaseEligible(path, policy.maximumImagePixels()));
+        std::atomic_bool cancelled{false};
+        const auto direct = Licasa::readFastPngPreview(
+            path, QSize(1000, 1000), policy.maximumImagePixels(), 8 * 1024 * 1024, &cancelled);
+        QCOMPARE(direct.fullBase.pixelColor(2500, 2500), QColor(210, 40, 90, 120));
+        QVERIFY(direct.fullBase.colorSpace() == QColorSpace(QColorSpace::SRgb));
+#else
+        QImage source(5000, 5000, QImage::Format_ARGB32);
+        QVERIFY(!source.isNull());
+        source.fill(QColor(30, 80, 140));
+        source.setPixelColor(2500, 2500, QColor(210, 40, 90, 120));
+        QVERIFY(source.save(path));
+        source = {};
+#endif
+
+        const QString base =
+            QStringLiteral("1/") + QString::fromLatin1(QUrl::toPercentEncoding(path));
+        std::unique_ptr<QQuickImageResponse> preview(provider.requestImageResponse(
+            base + QStringLiteral("?licasa_stage=preview"), QSize(1200, 1200)));
+        provider.waitForPendingWork();
+        QVERIFY(preview->errorString().isEmpty());
+        std::unique_ptr<QQuickTextureFactory> previewTexture(preview->textureFactory());
+        QVERIFY(previewTexture != nullptr);
+        QCOMPARE(previewTexture->image().size(), QSize(1200, 1200));
+        const quint64 hitsBeforeFull = provider.decodedBaseCacheHitCount();
+
+        std::unique_ptr<QQuickImageResponse> full(
+            provider.requestImageResponse(base + QStringLiteral("?licasa_stage=full"), QSize()));
+        provider.waitForPendingWork();
+        QVERIFY(full->errorString().isEmpty());
+        std::unique_ptr<QQuickTextureFactory> fullTexture(full->textureFactory());
+        QVERIFY(fullTexture != nullptr);
+        QCOMPARE(fullTexture->image().size(), QSize(5000, 5000));
+        const QColor displayed = fullTexture->image().pixelColor(2500, 2500);
+        QCOMPARE(displayed.red(), 210);
+        QCOMPARE(displayed.green(), 40);
+        QVERIFY(std::abs(displayed.blue() - 90) <= 1);
+        QCOMPARE(displayed.alpha(), 120);
+        QVERIFY(provider.decodedBaseCacheHitCount() > hitsBeforeFull);
+    }
+
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+    void fastPngRgbPreviewRespectsPixelsAndCancellation()
+    {
+        QTemporaryDir images;
+        QVERIFY(images.isValid());
+        const QString path = images.filePath(QStringLiteral("rgb.png"));
+        QVERIFY(writePlainLargePng(path, false));
+        QVERIFY(Licasa::fastPngBaseEligible(path, 40000000));
+        std::atomic_bool cancelled{false};
+        const auto decoded = Licasa::readFastPngPreview(path, QSize(1000, 1000), 40000000,
+                                                        8 * 1024 * 1024, &cancelled);
+        QCOMPARE(decoded.preview.size(), QSize(1000, 1000));
+        QCOMPARE(decoded.fullBase.size(), QSize(5000, 5000));
+        QCOMPARE(decoded.preview.pixelColor(500, 500), QColor(210, 40, 90));
+        QCOMPARE(decoded.fullBase.pixelColor(2500, 2500), QColor(210, 40, 90));
+        cancelled.store(true);
+        QVERIFY(Licasa::readFastPngPreview(path, QSize(1000, 1000), 40000000, 8 * 1024 * 1024,
+                                           &cancelled)
+                    .preview.isNull());
+        cancelled.store(false);
+        QVERIFY(Licasa::readFastPngPreview(path, QSize(1000, 1000), 40000000, 1000, &cancelled)
+                    .preview.isNull());
+        QFile truncated(path);
+        QVERIFY(truncated.open(QIODevice::ReadWrite));
+        QVERIFY(truncated.resize(truncated.size() / 2));
+        truncated.close();
+        QVERIFY(Licasa::readFastPngPreview(path, QSize(1000, 1000), 40000000, 8 * 1024 * 1024,
+                                           &cancelled)
+                    .preview.isNull());
+    }
+#endif
 
     void selectedPreviewDoesNotWaitForCancelledFullDecodeGate()
     {

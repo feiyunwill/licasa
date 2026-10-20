@@ -3,12 +3,15 @@
 
 #include <QColorSpace>
 #include <QRect>
+#include <QThread>
 #include <QTransform>
 #include <QUrlQuery>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <exception>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -206,17 +209,62 @@ bool applyColorAdjustments(QImage& image, const ImageEditParameters& parameters,
     }
 
     const ColorAdjustmentPlan plan(parameters, image.size());
-    for (int y = 0; y < image.height(); ++y) {
-        if (editCancelled(cancelled)) {
-            return false;
+    const int width = image.width();
+    const int height = image.height();
+    const qsizetype stride = image.bytesPerLine();
+    uchar* const pixels = image.bits(); // Detach once before worker threads touch disjoint rows.
+    if (!pixels) {
+        return false;
+    }
+    const auto processRows = [&](int first, int last) {
+        for (int y = first; y < last; ++y) {
+            if (editCancelled(cancelled)) {
+                return;
+            }
+            auto* row = reinterpret_cast<QRgb*>(pixels + qsizetype(y) * stride);
+            const double verticalRadiusSquared = plan.rowRadiusSquared(y);
+            for (int x = 0; x < width; ++x) {
+                row[x] = plan.apply(row[x], x, verticalRadiusSquared);
+            }
         }
-        auto* row = reinterpret_cast<QRgb*>(image.scanLine(y));
-        const double verticalRadiusSquared = plan.rowRadiusSquared(y);
-        for (int x = 0; x < image.width(); ++x) {
-            row[x] = plan.apply(row[x], x, verticalRadiusSquared);
+    };
+
+    bool workerOverrideValid = false;
+    const int workerOverride =
+        qEnvironmentVariableIntValue("LICASA_CPU_EDIT_WORKERS", &workerOverrideValid);
+    const int availableWorkers = std::max(1, QThread::idealThreadCount());
+    const int workerLimit = workerOverrideValid ? std::clamp(workerOverride, 1, 16)
+                                                : std::min(16, std::max(1, availableWorkers - 2));
+    const quint64 area = quint64(width) * quint64(height);
+    const int sizeWorkers = int(std::min<quint64>(area / 2'000'000, quint64(workerLimit)));
+    const int workers = area >= 4'000'000 ? std::min({sizeWorkers, height / 128, width}) : 1;
+    if (workers <= 1) {
+        processRows(0, height);
+        return !editCancelled(cancelled);
+    }
+
+    std::vector<std::thread> threads;
+    const auto boundary = [height, workers](int range) {
+        return int(qint64(height) * range / workers);
+    };
+    int nextRange = 1;
+    for (; nextRange < workers; ++nextRange) {
+        const int first = boundary(nextRange);
+        const int last = boundary(nextRange + 1);
+        try {
+            threads.emplace_back(processRows, first, last);
+        } catch (const std::exception&) {
+            break;
         }
     }
-    return true;
+    processRows(0, boundary(1));
+    for (int range = nextRange; range < workers; ++range) {
+        processRows(boundary(range), boundary(range + 1));
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    return !editCancelled(cancelled);
 }
 
 QImage applySoften(const QImage& source, qreal amount)

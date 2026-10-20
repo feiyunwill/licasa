@@ -1,7 +1,12 @@
 #include "imaging/image_probe.h"
 #include "imaging/image_decode_contract.h"
 #include "imaging/image_resource_policy.h"
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+#include "imaging/fast_png_preview.h"
+#endif
 #include <QDateTime>
+#include <QDebug>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImageReader>
 
@@ -12,6 +17,11 @@ ImageProbe::ImageProbe(ImageResourcePolicy& resourcePolicy, QObject* parent)
 
 QVariantMap ImageProbe::inspect(const QUrl& url) const
 {
+    const bool trace = qEnvironmentVariableIsSet("LICASA_TRACE_IMAGE_PROBE");
+    QElapsedTimer elapsed;
+    if (trace) {
+        elapsed.start();
+    }
     if (!url.isValid() || !url.isLocalFile()) {
         return {};
     }
@@ -25,6 +35,10 @@ QVariantMap ImageProbe::inspect(const QUrl& url) const
     const qint64 modified = fileInfo.lastModified().toMSecsSinceEpoch();
     if (lastProbePath_ == fileInfo.absoluteFilePath() && lastProbeBytes_ == fileInfo.size() &&
         lastProbeModified_ == modified && lastProbeBudget_ == budget) {
+        if (trace) {
+            qInfo().noquote() << "[Licasa] Image metadata cache hit:"
+                              << elapsed.nsecsElapsed() / 1000000.0 << "ms";
+        }
         return lastProbe_;
     }
     lastProbePath_ = fileInfo.absoluteFilePath();
@@ -37,11 +51,19 @@ QVariantMap ImageProbe::inspect(const QUrl& url) const
     ImageDecodeContract::configure(reader, budget);
     reader.setAutoTransform(true);
     if (!reader.canRead()) {
+        if (trace) {
+            qInfo().noquote() << "[Licasa] Image metadata probe (unreadable):"
+                              << elapsed.nsecsElapsed() / 1000000.0 << "ms";
+        }
         return lastProbe_;
     }
 
     QSize size = reader.size();
     if (!size.isValid()) {
+        if (trace) {
+            qInfo().noquote() << "[Licasa] Image metadata probe (unknown dimensions):"
+                              << elapsed.nsecsElapsed() / 1000000.0 << "ms";
+        }
         return lastProbe_;
     }
 
@@ -52,6 +74,18 @@ QVariantMap ImageProbe::inspect(const QUrl& url) const
     }
     const QSize sensor =
         reader.device()->property(ImageDecodeContract::sensorSizeProperty).toSize();
+    const bool plainPng =
+        fileInfo.suffix().compare(QStringLiteral("png"), Qt::CaseInsensitive) == 0 &&
+        reader.transformation() == QImageIOHandler::TransformationNone &&
+        (!reader.supportsAnimation() || reader.imageCount() == 1);
+    bool reusablePngBase = plainPng && ImageDecodeContract::reusablePngFullBase(
+                                           reader.size(), reader.imageFormat(), budget);
+#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+    if (plainPng && !reusablePngBase &&
+        ImageDecodeContract::boundedPngFullBase(reader.size(), budget)) {
+        reusablePngBase = fastPngBaseEligible(fileInfo.absoluteFilePath(), budget);
+    }
+#endif
     lastProbe_ = {
         {QStringLiteral("fileSize"), fileInfo.size()},
         {QStringLiteral("size"), size},
@@ -61,7 +95,12 @@ QVariantMap ImageProbe::inspect(const QUrl& url) const
         {QStringLiteral("previewFirst"),
          reader.device()->property(ImageDecodeContract::previewFirstProperty).toBool()},
         {QStringLiteral("previewSize"),
-         reader.device()->property(ImageDecodeContract::embeddedPreviewSizeProperty).toSize()}};
+         reader.device()->property(ImageDecodeContract::embeddedPreviewSizeProperty).toSize()},
+        {QStringLiteral("reusablePngBase"), reusablePngBase}};
+    if (trace) {
+        qInfo().noquote() << "[Licasa] Image metadata probe:" << elapsed.nsecsElapsed() / 1000000.0
+                          << "ms";
+    }
     return lastProbe_;
 }
 

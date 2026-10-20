@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -42,7 +43,9 @@ def main() -> None:
             "FROM ubuntu:24.04\n"
             "COPY licasa.deb /tmp/licasa.deb\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends "
-            "/tmp/licasa.deb && dpkg-query -W -f='${Status}\\n' licasa "
+            "/tmp/licasa.deb xvfb x11-utils weston libgl1-mesa-dri "
+            "desktop-file-utils xdg-utils "
+            "&& dpkg-query -W -f='${Status}\\n' licasa "
             "| grep -Fx 'install ok installed' && rm -rf /var/lib/apt/lists/*\n"
         )
         tag = "licasa-deb-verify:local"
@@ -99,6 +102,36 @@ def main() -> None:
         )
         if viewer.returncode:
             raise RuntimeError(f"Installed viewer did not stay open:\n{viewer.stdout}\n{viewer.stderr}")
+        displays = {}
+        for protocol in ("x11", "wayland"):
+            for mode in ("default", "software"):
+                name = f"{protocol}_{mode}"
+                display = subprocess.run(
+                    ["docker", "run", "--rm", "--network", "none", "--read-only",
+                     "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--shm-size", "256m",
+                     "--user", "65534:65534", "--cap-drop", "ALL",
+                     "-e", "HOME=/tmp/home", "-e", "XDG_CONFIG_HOME=/tmp/home/.config",
+                     "-e", "XDG_RUNTIME_DIR=/tmp/runtime",
+                     "-v", f"{ROOT / 'tools/check_display_session.sh'}:/opt/check_display_session.sh:ro",
+                     "-v", f"{assets / SAMPLES[0]}:/samples/photo.jpg:ro",
+                     tag, "sh", "/opt/check_display_session.sh", "/usr/bin/licasa",
+                     "/usr/bin/licasa_diagnostics", "/samples/photo.jpg", protocol, mode],
+                    capture_output=True, text=True, timeout=100,
+                )
+                if display.returncode:
+                    raise RuntimeError(f"Ubuntu .deb {name} failed:\n"
+                                       f"{display.stdout}\n{display.stderr}")
+                graphics = re.search(r"graphicsApi=([A-Za-z0-9]+)", display.stdout)
+                fallback = re.search(r"diagnostic_fallback=(true|false); app_retry=(true|false)",
+                                     display.stdout)
+                if not graphics or not fallback:
+                    raise RuntimeError(f"Ubuntu .deb {name} has incomplete results:\n"
+                                       f"{display.stdout}")
+                displays[name] = {"graphics_api": graphics.group(1),
+                                  "diagnostic_fallback": fallback.group(1) == "true",
+                                  "app_retry": fallback.group(2) == "true"}
+        report["display_sessions"] = displays
+        report["package_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(f"Clean Ubuntu apt install, viewer launch, and {len(SAMPLES)} decodes passed: {args.output}")

@@ -95,6 +95,7 @@ class JxlPluginTest final : public QObject {
     {
         QImageReader reader(fixture("large-48mp.jxl"));
         Contract::configure(reader, policy_->maximumImagePixels());
+        reader.device()->setProperty(Contract::retainFullBaseProperty, true);
         QVERIFY(reader.canRead());
         QCOMPARE(reader.size(), QSize(8000, 6000));
         QCOMPARE(reader.imageCount(), 1);
@@ -104,6 +105,7 @@ class JxlPluginTest final : public QObject {
         QVERIFY(reader.read().isNull());
         QVERIFY(codecError(reader).contains("limit"));
         QVERIFY(!reader.device()->property("_licasaNativeRasterPixels").isValid());
+        QVERIFY(!reader.device()->property(Contract::decodedFullBaseProperty).isValid());
     }
     void nativePixelsMatchReferences_data()
     {
@@ -166,6 +168,7 @@ class JxlPluginTest final : public QObject {
         // Exercise exact per-reader admission independently of the preference's
         // UI range: 3 MP primary is rejected, 196608-pixel preview is admitted.
         Contract::configure(reader, 200000);
+        reader.device()->setProperty(Contract::retainFullBaseProperty, true);
         QCOMPARE(reader.size(), natural);
         QCOMPARE(reader.device()->property(Contract::embeddedPreviewSizeProperty).toSize(),
                  natural.width() > natural.height() ? QSize(512, 384) : QSize(384, 512));
@@ -176,6 +179,7 @@ class JxlPluginTest final : public QObject {
         QCOMPARE(reader.device()->property("_licasaNativeRasterPixels").toULongLong(),
                  quint64(512 * 384));
         QVERIFY(reader.text("PreviewPath").contains("embedded preview"));
+        QVERIFY(!reader.device()->property(Contract::decodedFullBaseProperty).isValid());
         QImageReader full(fixture(name.toLatin1().constData()));
         Contract::configure(full, 200000);
         QVERIFY(full.read().isNull());
@@ -192,6 +196,54 @@ class JxlPluginTest final : public QObject {
         QCOMPARE(reader.device()->property("_licasaNativeRasterPixels").toULongLong(),
                  quint64(48000000));
         QVERIFY(reader.text("PreviewPath").contains("full native raster required"));
+    }
+    void scaledStillOffersReusableFullBaseOnlyWhenRequested()
+    {
+        const QString path = fixture("full-hd.jxl");
+        QImageReader full(path);
+        Contract::configure(full, policy_->maximumImagePixels());
+        const QImage expected = full.read();
+        QVERIFY(!expected.isNull());
+
+        QImageReader preview(path);
+        Contract::configure(preview, policy_->maximumImagePixels());
+        preview.device()->setProperty(Contract::retainFullBaseProperty, true);
+        preview.setScaledSize(QSize(480, 270));
+        QCOMPARE(preview.read().size(), QSize(480, 270));
+        QCOMPARE(preview.device()->property(Contract::decodedFullBaseProperty).value<QImage>(),
+                 expected);
+
+        QImageReader ordinary(path);
+        Contract::configure(ordinary, policy_->maximumImagePixels());
+        ordinary.setScaledSize(QSize(480, 270));
+        QVERIFY(!ordinary.read().isNull());
+        QVERIFY(!ordinary.device()->property(Contract::decodedFullBaseProperty).isValid());
+    }
+    void providerPromotesLargeStillWithoutSecondDecode()
+    {
+        preferences_->setMaximumImageMegapixels(100);
+        const QString path = fixture("large-48mp.jxl");
+        const QString request =
+            QStringLiteral("1/") + QString::fromLatin1(QUrl::toPercentEncoding(path));
+        Licasa::AsyncImageProvider provider(*policy_);
+
+        std::unique_ptr<QQuickImageResponse> preview(provider.requestImageResponse(
+            request + QStringLiteral("?licasa_stage=preview"), QSize(1200, 900)));
+        provider.waitForPendingWork();
+        QVERIFY2(preview->errorString().isEmpty(), qPrintable(preview->errorString()));
+        std::unique_ptr<QQuickTextureFactory> previewTexture(preview->textureFactory());
+        QVERIFY(previewTexture);
+        QCOMPARE(previewTexture->textureSize(), QSize(1200, 900));
+
+        std::unique_ptr<QQuickImageResponse> full(
+            provider.requestImageResponse(request + QStringLiteral("?licasa_stage=full"), QSize()));
+        provider.waitForPendingWork();
+        QVERIFY2(full->errorString().isEmpty(), qPrintable(full->errorString()));
+        std::unique_ptr<QQuickTextureFactory> fullTexture(full->textureFactory());
+        QVERIFY(fullTexture);
+        QCOMPARE(fullTexture->textureSize(), QSize(8000, 6000));
+        QCOMPARE(provider.decodedBaseCacheHitCount(), quint64(1));
+        preferences_->setMaximumImageMegapixels(25);
     }
     void animationTimingAndSeeking()
     {

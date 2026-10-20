@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 
 from verify_installed_release import SAMPLES
@@ -23,80 +24,43 @@ export XDG_CACHE_HOME=/tmp/cache
 export XDG_CONFIG_HOME=/tmp/config
 export XDG_DATA_HOME=/tmp/home/.local/share
 export HOME=/tmp/home
-export LIBGL_ALWAYS_SOFTWARE=1
 cp "$1" '/tmp/photo with spaces.jpg'
-mkdir -p "$HOME"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME"
 /opt/install-licasa-appimage.sh /opt/Licasa.AppImage
 desktop-file-validate "$XDG_DATA_HOME/applications/licasa-appimage.desktop"
 xdg-mime default licasa-appimage.desktop image/jpeg
 test "$(xdg-mime query default image/jpeg)" = licasa-appimage.desktop
+cd /tmp
+/opt/Licasa.AppImage --appimage-extract >/dev/null
 """
-X11 = SETUP + """
-export DISPLAY=:90
-export QT_QPA_PLATFORM=xcb
-Xvfb :90 -ac -screen 0 1280x800x24 -nolisten tcp >/tmp/display.log 2>&1 & display_pid=$!
-viewer_pid=
-trap 'kill "$viewer_pid" "$display_pid" 2>/dev/null || true' EXIT
-i=0
-while [ ! -S /tmp/.X11-unix/X90 ] && [ "$i" -lt 40 ]; do
-    kill -0 "$display_pid" 2>/dev/null || { cat /tmp/display.log; exit 1; }
-    sleep 0.25
-    i=$((i + 1))
-done
-test -S /tmp/.X11-unix/X90 || { cat /tmp/display.log; exit 1; }
-"$HOME/.local/opt/licasa-appimage/AppRun" '/tmp/photo with spaces.jpg' >/tmp/viewer.log 2>&1 & viewer_pid=$!
-i=0
-while [ "$i" -lt 80 ]; do
-    kill -0 "$viewer_pid" 2>/dev/null || { cat /tmp/viewer.log; exit 1; }
-    if xwininfo -root -tree 2>/dev/null | grep -q '"Licasa"'; then
-        echo 'Arch X11: Licasa window opened'
-        exit 0
-    fi
-    sleep 0.25
-    i=$((i + 1))
-done
-cat /tmp/viewer.log
-echo 'Licasa did not create an X11 window' >&2
-exit 1
-"""
-WAYLAND = SETUP + """
-export DISPLAY=:91
-export WAYLAND_DISPLAY=wayland-licasa
-export QT_QPA_PLATFORM=wayland
-export QT_QUICK_BACKEND=software
-Xvfb :91 -ac -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & x11_pid=$!
-i=0
-while [ ! -S /tmp/.X11-unix/X91 ] && [ "$i" -lt 40 ]; do
-    kill -0 "$x11_pid" 2>/dev/null || { cat /tmp/xvfb.log; exit 1; }
-    sleep 0.25
-    i=$((i + 1))
-done
-test -S /tmp/.X11-unix/X91 || { cat /tmp/xvfb.log; exit 1; }
-weston --backend=x11 --renderer=pixman --socket="$WAYLAND_DISPLAY" --idle-time=0 >/tmp/display.log 2>&1 & display_pid=$!
-viewer_pid=
-trap 'kill "$viewer_pid" "$display_pid" "$x11_pid" 2>/dev/null || true' EXIT
-i=0
-while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && [ "$i" -lt 40 ]; do
-    kill -0 "$display_pid" 2>/dev/null || { cat /tmp/display.log; exit 1; }
-    sleep 0.25
-    i=$((i + 1))
-done
-test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" || { cat /tmp/display.log; exit 1; }
-grep -q "Compositor capabilities:" /tmp/display.log || { cat /tmp/display.log; exit 1; }
-"$HOME/.local/opt/licasa-appimage/AppRun" '/tmp/photo with spaces.jpg' >/tmp/viewer.log 2>&1 & viewer_pid=$!
-i=0
-while [ "$i" -lt 40 ]; do
-    kill -0 "$viewer_pid" 2>/dev/null || { cat /tmp/viewer.log; exit 1; }
-    sleep 0.25
-    i=$((i + 1))
-done
-grep -q 'Qt Quick backend (sceneGraphInitialized)' /tmp/viewer.log || {
-    cat /tmp/viewer.log
-    echo 'Wayland scene graph did not initialize' >&2
-    exit 1
-}
-echo 'Arch Wayland: Licasa stayed open'
-"""
+
+
+def run_display_check(name: str, script: str, appimage: Path, sample: Path,
+                      checks: dict[str, object]) -> None:
+    command = [
+        "docker", "run", "--rm", "--network", "none", "--read-only",
+        "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--shm-size", "256m",
+        "--user", "65534:65534", "--cap-drop", "ALL",
+        "-v", f"{appimage}:/opt/Licasa.AppImage:ro",
+        "-v", f"{ROOT / 'packaging/install-licasa-appimage.sh'}:/opt/install-licasa-appimage.sh:ro",
+        "-v", f"{ROOT / 'tools/check_display_session.sh'}:/opt/check_display_session.sh:ro",
+        "-v", f"{sample}:/samples/photo.jpg:ro",
+        IMAGE, "sh", "-ec", script, "_", "/samples/photo.jpg",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=100)
+    if result.returncode:
+        raise RuntimeError(f"{name} failed:\n{result.stdout}\n{result.stderr}")
+    match = re.search(r"graphicsApi=([A-Za-z0-9]+)", result.stdout)
+    if not match:
+        raise RuntimeError(f"{name} did not report its graphics API:\n{result.stdout}")
+    fallback = re.search(r"diagnostic_fallback=(true|false); app_retry=(true|false)",
+                         result.stdout)
+    if not fallback:
+        raise RuntimeError(f"{name} did not report recovery results:\n{result.stdout}")
+    checks[name] = {"passed": True, "graphics_api": match.group(1),
+                    "diagnostic_fallback": fallback.group(1) == "true",
+                    "app_retry": fallback.group(2) == "true"}
+    print(result.stdout.strip(), flush=True)
 
 
 def main() -> None:
@@ -115,21 +79,16 @@ def main() -> None:
                     str(ROOT / "packaging/verify-appimage-arch.Dockerfile"),
                     "--tag", IMAGE, str(ROOT / "packaging")], check=True)
     checks = {}
-    for name, script in (("arch_x11_window", X11), ("arch_wayland_launch", WAYLAND)):
-        command = [
-            "docker", "run", "--rm", "--network", "none", "--read-only",
-            "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--shm-size", "256m",
-            "--user", "65534:65534", "--cap-drop", "ALL",
-            "-v", f"{appimage}:/opt/Licasa.AppImage:ro",
-            "-v", f"{ROOT / 'packaging/install-licasa-appimage.sh'}:/opt/install-licasa-appimage.sh:ro",
-            "-v", f"{sample}:/samples/photo.jpg:ro",
-            IMAGE, "sh", "-ec", script, "_", "/samples/photo.jpg",
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=90)
-        if result.returncode:
-            raise RuntimeError(f"{name} failed:\n{result.stdout}\n{result.stderr}")
-        checks[name] = True
-        print(result.stdout.strip(), flush=True)
+    for protocol in ("x11", "wayland"):
+        for mode in ("default", "software"):
+            name = f"arch_{protocol}_{mode}_frame"
+            script = SETUP + (
+                "sh /opt/check_display_session.sh "
+                '"$HOME/.local/opt/licasa-appimage/AppRun" '
+                "/tmp/squashfs-root/usr/bin/licasa_diagnostics "
+                f"'/tmp/photo with spaces.jpg' {protocol} {mode}"
+            )
+            run_display_check(name, script, appimage, sample, checks)
 
     decode_script = (
         "cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null; "

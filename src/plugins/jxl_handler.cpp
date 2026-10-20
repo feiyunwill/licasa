@@ -241,6 +241,14 @@ class JxlHandler final : public QImageIOHandler {
                 device()->setProperty("_licasaNativePeakBytes",
                                       QVariant::fromValue(quint64(peakAllocation_.load())));
                 raster.setColorSpace(QColorSpace::SRgb);
+                if (!usePreview && !info_.have_animation && target != rasterSize && device() &&
+                    device()->property(Contract::retainFullBaseProperty).toBool() &&
+                    raster.sizeInBytes() > 0 && raster.sizeInBytes() <= 256 * 1024 * 1024) {
+                    // The full raster is already decoded for this scaled
+                    // preview. Share it with the provider before scaling.
+                    device()->setProperty(Contract::decodedFullBaseProperty,
+                                          QVariant::fromValue(raster));
+                }
                 if (target != rasterSize) {
                     raster = raster.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
                 }

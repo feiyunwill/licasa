@@ -3,6 +3,7 @@
 #include <QColorSpace>
 #include <QList>
 #include <QRandomGenerator>
+#include <QScopeGuard>
 #include <QTest>
 
 #include <algorithm>
@@ -149,6 +150,42 @@ class ImageEditPipelineTest final : public QObject {
                 }
             }
         }
+    }
+
+    void parallelColorAdjustmentsMatchSerialPixels()
+    {
+        const QByteArray previousBackend = qgetenv("LICASA_EDIT_BACKEND");
+        const QByteArray previousWorkers = qgetenv("LICASA_CPU_EDIT_WORKERS");
+        const auto restore = qScopeGuard([&] {
+            if (previousBackend.isNull()) {
+                qunsetenv("LICASA_EDIT_BACKEND");
+            } else {
+                qputenv("LICASA_EDIT_BACKEND", previousBackend);
+            }
+            if (previousWorkers.isNull()) {
+                qunsetenv("LICASA_CPU_EDIT_WORKERS");
+            } else {
+                qputenv("LICASA_CPU_EDIT_WORKERS", previousWorkers);
+            }
+        });
+        qputenv("LICASA_EDIT_BACKEND", "cpu");
+        QRandomGenerator random(0x6123u);
+        const QImage source = randomImage(QSize(2048, 2048), random);
+        Licasa::ImageEditParameters edit;
+        edit.exposure = 0.35;
+        edit.contrast = -0.17;
+        edit.vibrance = 0.41;
+        edit.shadows = 0.23;
+        edit.vignette = 0.38;
+
+        qputenv("LICASA_CPU_EDIT_WORKERS", "1");
+        QImage serial = source;
+        QVERIFY(Licasa::applyImageEdits(serial, edit));
+        qputenv("LICASA_CPU_EDIT_WORKERS", "8");
+        QImage parallel = source;
+        QVERIFY(Licasa::applyImageEdits(parallel, edit));
+        QCOMPARE(parallel, serial);
+        QCOMPARE(parallel.colorSpace(), source.colorSpace());
     }
 
     void backendEnvironmentOverrideAppliesWithExecutionTelemetry()

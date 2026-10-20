@@ -149,6 +149,8 @@ bool SingleInstanceServer::start()
     return false;
 }
 
+void SingleInstanceServer::stop() { server_.close(); }
+
 void SingleInstanceServer::acceptPendingConnections()
 {
     while (QLocalSocket* socket = server_.nextPendingConnection()) {
