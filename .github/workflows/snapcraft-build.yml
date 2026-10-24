@@ -43,6 +43,10 @@ jobs:
             echo "Expected no existing GitHub Release; API returned $status" >&2
             exit 1
           fi
+      - name: Check installer regressions before building
+        run: |
+          python3 -B tests/test_appimage_installer.py -v
+          bash -n packaging/install-licasa-appimage.sh
 
   verify_sanitizers:
     needs: preflight
@@ -327,7 +331,7 @@ jobs:
           SNAP_REVISION: ${{ needs.upload_snap_edge.outputs.revision }}
         run: |
           {
-            printf 'Preview release: the checked Snap is on Store edge as revision %s. Beta follows qualification.\n\n' "$SNAP_REVISION"
+            printf 'Preview release: the checked Snap is on Store edge as revision %s. Stable follows qualification.\n\n' "$SNAP_REVISION"
             cat "packaging/release-notes/$RELEASE_TAG.md"
             printf "\n### Package SHA-256 checksums\n\n\`\`\`text\n"
             cat "dist/deb/licasa_${VERSION}-1_amd64.deb.sha256"

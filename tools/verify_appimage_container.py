@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an AppImage without network or preinstalled Qt on clean Ubuntu 24.04."""
+"""Run an AppImage without network or preinstalled Qt on a selected clean Ubuntu."""
 
 from __future__ import annotations
 
@@ -17,11 +17,17 @@ from verify_installed_release import SAMPLES
 
 ROOT = Path(__file__).resolve().parents[1]
 EXTRA_SAMPLES = {"jp2": "formats/additional-probes/jpeg-2000.jp2"}
+# Host graphics, font and session libraries; Qt and codecs must be bundled.
+HOST_RUNTIME_PACKAGES = (
+    "libx11-6", "libxext6", "libxcb1", "libgl1", "libegl1", "libopengl0",
+    "libfontconfig1", "libharfbuzz0b", "libdbus-1-3",
+)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("appimage", type=Path)
+    parser.add_argument("--ubuntu-version", choices=("24.04", "26.04"), default="24.04")
     parser.add_argument("--output", type=Path,
                         default=ROOT / "build/qualification/appimage/install-smoke.json")
     args = parser.parse_args()
@@ -37,15 +43,22 @@ def main() -> None:
         shutil.copy2(ROOT / "packaging/install-licasa-appimage.sh",
                      work / "install-licasa-appimage.sh")
         (work / "Dockerfile").write_text(
-            "FROM ubuntu:24.04\n"
+            f"FROM ubuntu:{args.ubuntu_version}\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends "
-            "libx11-6 libxext6 libxcb1 libgl1 libegl1 libopengl0 "
-            "libfontconfig1 libharfbuzz0b libdbus-1-3 "
-            "desktop-file-utils xdg-utils xvfb x11-utils weston libgl1-mesa-dri "
+            + " ".join(HOST_RUNTIME_PACKAGES) + " "
             "&& rm -rf /var/lib/apt/lists/*\n"
             "COPY --chmod=755 Licasa.AppImage /opt/Licasa.AppImage\n"
-            "COPY --chmod=755 install-licasa-appimage.sh /opt/install-licasa-appimage.sh\n")
-        tag = "licasa-appimage-verify:local"
+            "COPY --chmod=755 install-licasa-appimage.sh /opt/install-licasa-appimage.sh\n"
+            # Scan the whole bundle before display tools can supply missing libraries.
+            "RUN cd /tmp && /opt/Licasa.AppImage --appimage-extract >/dev/null "
+            "&& bash -ec '. /opt/install-licasa-appimage.sh; "
+            "licasa_check_runtime_dependencies "
+            "/tmp/squashfs-root/usr/lib/licasa/lib:/tmp/squashfs-root/usr/lib "
+            "/tmp/squashfs-root/usr' && rm -rf /tmp/squashfs-root\n"
+            "RUN apt-get update && apt-get install -y --no-install-recommends "
+            "desktop-file-utils xdg-utils xvfb x11-utils weston libgl1-mesa-dri "
+            "&& rm -rf /var/lib/apt/lists/*\n")
+        tag = f"licasa-appimage-ubuntu-{args.ubuntu_version}-verify:local"
         subprocess.run(["docker", "build", "--tag", tag, str(work)], check=True)
         command = (
             "cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null; "
@@ -162,6 +175,9 @@ def main() -> None:
                                   "diagnostic_fallback": fallback.group(1) == "true",
                                   "app_retry": fallback.group(2) == "true"}
         report["display_sessions"] = displays
+        report["ubuntu_version"] = args.ubuntu_version
+        report["runtime_dependencies_checked_before_desktop_tools"] = True
+        report["host_runtime_packages"] = HOST_RUNTIME_PACKAGES
         report["appimage_sha256"] = hashlib.sha256(appimage.read_bytes()).hexdigest()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")

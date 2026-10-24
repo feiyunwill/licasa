@@ -499,6 +499,7 @@ foreach(backend IN ITEMS opencl cuda)
     add_test(NAME licasa_gpu_image_edits_${backend} COMMAND licasa_gpu_image_edit_tests)
     set_tests_properties(licasa_gpu_image_edits_${backend} PROPERTIES
         TIMEOUT 120 RUN_SERIAL TRUE LABELS "editing;gpu"
+        SKIP_RETURN_CODE 77
         ENVIRONMENT "LICASA_TEST_EDIT_BACKEND=${backend}")
 endforeach()
 target_link_libraries(licasa_image_edit_pipeline_tests PRIVATE licasa_image_services Qt6::Test)

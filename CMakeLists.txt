@@ -5,7 +5,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(Licasa
-        VERSION 0.7.0
+        VERSION 0.7.1
         LANGUAGES CXX
 )
 set(LICASA_RELEASE_DATE "2026-10-24")

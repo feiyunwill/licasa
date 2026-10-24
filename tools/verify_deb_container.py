@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -39,14 +40,24 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="licasa-deb-verify-") as temporary:
         work = Path(temporary)
         (work / "licasa.deb").write_bytes(package.read_bytes())
+        shutil.copy2(ROOT / "packaging/install-licasa-appimage.sh", work / "installer.sh")
         (work / "Dockerfile").write_text(
             "FROM ubuntu:24.04\n"
             "COPY licasa.deb /tmp/licasa.deb\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends "
-            "/tmp/licasa.deb xvfb x11-utils weston libgl1-mesa-dri "
-            "desktop-file-utils xdg-utils "
+            "/tmp/licasa.deb "
             "&& dpkg-query -W -f='${Status}\\n' licasa "
             "| grep -Fx 'install ok installed' && rm -rf /var/lib/apt/lists/*\n"
+            "COPY installer.sh /opt/licasa-installer.sh\n"
+            # No desktop harness or undeclared runtime packages may help this check.
+            "RUN bash -ec '. /opt/licasa-installer.sh; "
+            "licasa_check_runtime_dependencies /usr/lib/licasa/lib "
+            "/usr/bin/licasa /usr/bin/licasa_diagnostics /usr/lib/licasa "
+            "/usr/lib/x86_64-linux-gnu/qt6/plugins "
+            "/usr/lib/x86_64-linux-gnu/qt6/qml'\n"
+            "RUN apt-get update && apt-get install -y --no-install-recommends "
+            "xvfb x11-utils weston libgl1-mesa-dri desktop-file-utils xdg-utils "
+            "&& rm -rf /var/lib/apt/lists/*\n"
         )
         tag = "licasa-deb-verify:local"
         subprocess.run(["docker", "build", "--tag", tag, str(work)], check=True)
@@ -61,15 +72,6 @@ def main() -> None:
         installed_icon_hashes = [line.split()[0] for line in icon_result.stdout.splitlines()]
         if installed_icon_hashes != [expected_icon_hash, expected_icon_hash]:
             raise RuntimeError("Installed launcher icon does not match assets/licasa.png")
-        subprocess.run(
-            ["docker", "run", "--rm", "--network", "none", "--user", "65534:65534",
-             tag, "sh", "-ec",
-             "for f in /usr/bin/licasa /usr/bin/licasa_diagnostics "
-             "/usr/lib/licasa/lib/*.so* /usr/lib/licasa/plugins/*/*.so; do "
-             "if ldd \"$f\" | grep -q 'not found'; then "
-             "echo \"Missing dependency: $f\"; exit 1; fi; done"],
-            check=True,
-        )
         result = subprocess.run(
             ["docker", "run", "--rm", "--network", "none", "--read-only",
              "--tmpfs", "/tmp:rw,nosuid,nodev", "--user", "65534:65534",
@@ -131,6 +133,7 @@ def main() -> None:
                                   "diagnostic_fallback": fallback.group(1) == "true",
                                   "app_retry": fallback.group(2) == "true"}
         report["display_sessions"] = displays
+        report["runtime_dependencies_checked_before_desktop_tools"] = True
         report["package_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")

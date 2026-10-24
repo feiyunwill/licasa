@@ -1,0 +1,195 @@
+name: Qualify published packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing published release to check without rebuilding or publishing
+        required: true
+        default: v0.7.1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify-packages-${{ inputs.release_tag }}
+  cancel-in-progress: true
+
+jobs:
+  source_checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require a disposable hosted VM and a release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Check source-only installer and desktop assertions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pil
+          /usr/bin/python3 -B -m unittest discover -s tests -p 'test_*qualification.py' -v
+          /usr/bin/python3 -B tests/test_appimage_installer.py -v
+          bash -n packaging/install-licasa-appimage.sh
+          python3 tools/check_public_files.py --history HEAD
+          {
+            echo '## Qualification scope'
+            echo 'Reuses published packages. No application build, release creation, Store upload or promotion.'
+            echo 'Desktop checks use nested GNOME/Plasma with software rendering on disposable hosted VMs.'
+            echo 'Physical AMD/Intel graphics coverage remains untested.'
+            echo 'The C++ GPU skip-status change still requires the normal build-and-test workflow.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  ubuntu_packages:
+    needs: source_checks
+    runs-on: ${{ format('ubuntu-{0}', matrix.ubuntu) }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        ubuntu: ['22.04', '24.04', '26.04']
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require a disposable hosted VM
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          mkdir -p reports
+          lscpu > reports/cpu.txt
+      - name: Download the published packages and verify checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ needs.source_checks.outputs.version }}
+        run: |
+          mkdir -p packages reports
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,publishedAt,assets > reports/release.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir packages \
+            --pattern "licasa_${VERSION}-1_amd64.deb*" \
+            --pattern "Licasa-${VERSION}-x86_64.AppImage*"
+          (cd packages && sha256sum --check "licasa_${VERSION}-1_amd64.deb.sha256")
+          (cd packages && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256")
+      - name: Check Snap installation on the additional Ubuntu hosts
+        if: matrix.ubuntu != '24.04'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ needs.source_checks.outputs.version }}
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir packages \
+            --pattern "licasa_${VERSION}_amd64.snap*"
+          (cd packages && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
+          sudo snap install --dangerous "packages/licasa_${VERSION}_amd64.snap"
+          python3 tools/verify_snap_install.py --version "$VERSION" --output reports/snap-install.json
+      - name: Check the selected Ubuntu version
+        env:
+          VERSION: ${{ needs.source_checks.outputs.version }}
+          UBUNTU_VERSION: ${{ matrix.ubuntu }}
+        run: |
+          set -euo pipefail
+          deb="packages/licasa_${VERSION}-1_amd64.deb"
+          appimage="packages/Licasa-${VERSION}-x86_64.AppImage"
+          case "$UBUNTU_VERSION" in
+            24.04)
+              python3 tools/verify_deb_container.py "$deb" --output reports/deb.json \
+                2>&1 | tee reports/deb.log
+              python3 tools/verify_appimage_container.py "$appimage" \
+                --ubuntu-version 24.04 --output reports/appimage.json \
+                2>&1 | tee reports/appimage.log
+              ;;
+            26.04)
+              python3 tools/verify_unsupported_ubuntu.py "$deb" --ubuntu-version 26.04 \
+                --output reports/native-rejection.json 2>&1 | tee reports/native-rejection.log
+              python3 tools/verify_appimage_container.py "$appimage" \
+                --ubuntu-version 26.04 --output reports/appimage.json \
+                2>&1 | tee reports/appimage.log
+              ;;
+            22.04)
+              python3 tools/verify_unsupported_ubuntu.py "$deb" --ubuntu-version 22.04 \
+                --appimage "$appimage" --output reports/rejection.json \
+                2>&1 | tee reports/rejection.log
+              ;;
+          esac
+          {
+            echo "## Ubuntu $UBUNTU_VERSION"
+            echo 'Package evidence is attached as JSON and logs.'
+            echo 'Unsupported-version rejection is a separate outcome from a successful installation.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ubuntu-${{ matrix.ubuntu }}-qualification
+          path: reports/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+
+  snap_desktops:
+    needs: source_checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        desktop: [gnome, kde]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require a disposable hosted VM
+        run: test "$RUNNER_ENVIRONMENT" = github-hosted
+      - name: Download and install the exact published Snap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ needs.source_checks.outputs.version }}
+        run: |
+          mkdir -p packages reports
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,publishedAt,assets > reports/release.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir packages \
+            --pattern "licasa_${VERSION}_amd64.snap*"
+          (cd packages && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
+          sudo snap install --dangerous "packages/licasa_${VERSION}_amd64.snap"
+          python3 tools/verify_snap_install.py --version "$VERSION" --output reports/snap-install.json
+      - name: Install the desktop test environment
+        env:
+          DESKTOP: ${{ matrix.desktop }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-pil xvfb dbus-x11 libglib2.0-bin x11-utils imagemagick \
+            mesa-utils libgl1-mesa-dri fonts-dejavu-core
+          case "$DESKTOP" in
+            gnome) sudo apt-get install -y --no-install-recommends gnome-shell ;;
+            kde) sudo apt-get install -y --no-install-recommends \
+              kwin-x11 kwin-wayland plasma-workspace plasma-workspace-wayland ;;
+          esac
+      - name: Check normal X11 and Wayland Snap launches
+        env:
+          VERSION: ${{ needs.source_checks.outputs.version }}
+          DESKTOP: ${{ matrix.desktop }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 tools/verify_snap_desktop.py --desktop "$DESKTOP" \
+            --version "$VERSION" --output reports/desktop 2>&1 | tee reports/desktop.log
+          {
+            echo "## $DESKTOP Snap desktop checks"
+            echo 'Normal snap launcher, X11 and Wayland, default Qt graphics and forced software rendering.'
+            echo 'Visible photo assertions and screenshots are attached. Physical GPU coverage remains untested.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: snap-${{ matrix.desktop }}-qualification
+          path: reports/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error

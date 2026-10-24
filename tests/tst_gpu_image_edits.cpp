@@ -2,6 +2,7 @@
 #include "imaging/image_edit_pipeline.h"
 
 #include <QColorSpace>
+#include <QCoreApplication>
 #include <QRandomGenerator>
 #include <QTest>
 
@@ -12,8 +13,12 @@ using namespace Licasa;
 class GpuImageEditsTest final : public QObject {
     Q_OBJECT
 
+  public:
+    bool backendUnavailable() const { return unavailable; }
+
   private:
     ImageEditBackend backend = ImageEditBackend::OpenCl;
+    bool unavailable = false;
 
     QImage fixture(QSize size)
     {
@@ -70,6 +75,7 @@ class GpuImageEditsTest final : public QObject {
             if (qEnvironmentVariableIsSet("LICASA_REQUIRE_GPU_EDITS")) {
                 QFAIL(qPrintable(execution.detail));
             }
+            unavailable = true;
             QSKIP(qPrintable(execution.detail));
         }
     }
@@ -184,5 +190,15 @@ class GpuImageEditsTest final : public QObject {
     }
 };
 
-QTEST_GUILESS_MAIN(GpuImageEditsTest)
+int main(int argc, char** argv)
+{
+    QCoreApplication application(argc, argv);
+    application.setAttribute(Qt::AA_Use96Dpi, true);
+    GpuImageEditsTest test;
+    QTEST_SET_MAIN_SOURCE_PATH
+    const int result = QTest::qExec(&test, argc, argv);
+    // Only a successful Qt run may become a CTest skip. Failures stay failures,
+    // including when LICASA_REQUIRE_GPU_EDITS requires an actual device.
+    return result != 0 ? 1 : (test.backendUnavailable() ? 77 : 0);
+}
 #include "tst_gpu_image_edits.moc"
