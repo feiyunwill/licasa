@@ -48,3 +48,17 @@ __pycache__/
 /.snapcraft/
 /.craft/
 /*.snap
+
+# Public documentation
+*.[mM][dD]
+*.[mM][dD][xX]
+*.[mM][aA][rR][kK][dD][oO][wW][nN]
+*.[mM][dD][oO][wW][nN]
+*.[rR][sS][tT]
+*.[aA][dD][oO][cC]
+*.[oO][rR][gG]
+!/README.md
+!/packaging/release-notes/*.md
+/docs/
+/.agents/
+/.codex/
