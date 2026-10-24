@@ -477,6 +477,10 @@ if(LICASA_HAVE_FAST_PNG_PREVIEW)
     target_compile_definitions(licasa_async_image_provider_tests PRIVATE
             LICASA_HAVE_FAST_PNG_PREVIEW=1)
 endif()
+if(LICASA_WEBP_FOUND)
+    target_compile_definitions(licasa_async_image_provider_tests PRIVATE
+            LICASA_HAVE_FAST_WEBP_PREVIEW=1)
+endif()
 licasa_enable_warnings(licasa_async_image_provider_tests)
 list(APPEND LICASA_TEST_TARGETS licasa_async_image_provider_tests)
 list(APPEND LICASA_CORE_TEST_TARGETS licasa_async_image_provider_tests)

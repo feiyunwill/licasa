@@ -9,10 +9,14 @@
 #include "imaging/fast_png_preview.h"
 #include <png.h>
 #endif
+#ifdef LICASA_HAVE_FAST_WEBP_PREVIEW
+#include "imaging/fast_webp_preview.h"
+#endif
 
 #include <QColorSpace>
 #include <QFile>
 #include <QImage>
+#include <QImageWriter>
 #include <QQuickTextureFactory>
 #include <QSemaphore>
 #include <QSettings>
@@ -89,6 +93,35 @@ class AsyncImageProviderTest final : public QObject {
     Q_OBJECT
 
   private slots:
+#ifdef LICASA_HAVE_FAST_WEBP_PREVIEW
+    void simpleWebpPreviewUsesBoundedBufferAndRejectsCancellation()
+    {
+        QTemporaryDir images;
+        QVERIFY(images.isValid());
+        const QString path = images.filePath(QStringLiteral("large.webp"));
+        QImage source(2400, 1600, QImage::Format_RGB32);
+        QVERIFY(!source.isNull());
+        source.fill(QColor(35, 80, 140));
+        QImageWriter writer(path, "webp");
+        writer.setQuality(95);
+        QVERIFY2(writer.write(source), qPrintable(writer.errorString()));
+
+        std::atomic_bool cancelled{false};
+        const QImage preview =
+            Licasa::readFastWebpPreview(path, QSize(600, 400), 4'000'000, 1'000'000, &cancelled);
+        QCOMPARE(preview.size(), QSize(600, 400));
+        QVERIFY(preview.sizeInBytes() <= 1'000'000);
+        const QColor pixel = preview.pixelColor(300, 200);
+        QVERIFY(qAbs(pixel.red() - 35) <= 5);
+        QVERIFY(qAbs(pixel.green() - 80) <= 5);
+        QVERIFY(qAbs(pixel.blue() - 140) <= 5);
+        QVERIFY(Licasa::readFastWebpPreview(path, QSize(600, 400), 3'000'000, 1'000'000, &cancelled)
+                    .isNull());
+        cancelled.store(true);
+        QVERIFY(Licasa::readFastWebpPreview(path, QSize(600, 400), 4'000'000, 1'000'000, &cancelled)
+                    .isNull());
+    }
+#endif
 #ifdef LICASA_HAVE_FAST_TIFF_PREVIEW
     void largeGrayTiffPreviewStaysBoundedAndCancelable()
     {
@@ -223,6 +256,60 @@ class AsyncImageProviderTest final : public QObject {
         QVERIFY(provider.nearbyPreviewBytes() <= 48 * 1024 * 1024);
     }
 
+    void largeWebpNearbyPreviewRespectsDistanceAndMemory()
+    {
+        if (!QImageWriter::supportedImageFormats().contains("webp")) {
+            QSKIP("WebP image writer unavailable");
+        }
+        QTemporaryDir settings;
+        QTemporaryDir images;
+        QVERIFY(settings.isValid());
+        QVERIFY(images.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        Licasa::ViewerPreferences preferences;
+        Licasa::ImageResourcePolicy policy(preferences);
+        const QString firstPath = images.filePath(QStringLiteral("neighbor-0.webp"));
+        QImage source(3840, 2160, QImage::Format_RGB32);
+        source.fill(QColor(30, 80, 140));
+        QVERIFY(source.save(firstPath, "WEBP", 80));
+        source = {};
+        QList<QUrl> urls{QUrl::fromLocalFile(firstPath)};
+        for (int index = 1; index < 4; ++index) {
+            const QString path = images.filePath(QStringLiteral("neighbor-%1.webp").arg(index));
+            QVERIFY(QFile::copy(firstPath, path));
+            urls.append(QUrl::fromLocalFile(path));
+        }
+
+        const QSize target(1200, 675);
+        Licasa::AsyncImageProvider minimumBudget(policy);
+        minimumBudget.prepareNearbyPreviews(urls, target, 384);
+        minimumBudget.waitForPendingWork();
+        QVERIFY(!minimumBudget.hasNearbyPreview(urls.first()));
+
+        Licasa::AsyncImageProvider provider(policy);
+        provider.prepareNearbyPreviews(urls, target, 8192);
+        provider.waitForPendingWork();
+        for (int index = 0; index < 3; ++index) {
+            QVERIFY(provider.hasNearbyPreview(urls.at(index)));
+        }
+        QVERIFY(!provider.hasNearbyPreview(urls.at(3)));
+        QVERIFY(provider.nearbyPreviewBytes() <= 96 * 1024 * 1024);
+
+        const quint64 hitsBefore = provider.nearbyPreviewHitCount();
+        const QString request = QStringLiteral("1/") +
+                                QString::fromLatin1(QUrl::toPercentEncoding(firstPath)) +
+                                QStringLiteral("?licasa_stage=preview");
+        std::unique_ptr<QQuickImageResponse> response(
+            provider.requestImageResponse(request, target));
+        provider.waitForPendingWork();
+        QVERIFY2(response->errorString().isEmpty(), qPrintable(response->errorString()));
+        std::unique_ptr<QQuickTextureFactory> texture(response->textureFactory());
+        QVERIFY(texture);
+        QCOMPARE(texture->textureSize(), target);
+        QVERIFY(provider.nearbyPreviewHitCount() > hitsBefore);
+    }
+
     void largePngPreviewReusesItsDecodedFullBase()
     {
         QTemporaryDir settings;
@@ -236,12 +323,14 @@ class AsyncImageProviderTest final : public QObject {
         Licasa::ImageResourcePolicy policy(preferences);
         Licasa::AsyncImageProvider provider(policy);
         const QString path = images.filePath(QStringLiteral("large.png"));
+        const QUrl url = QUrl::fromLocalFile(path);
 #ifdef LICASA_HAVE_FAST_PNG_PREVIEW
         QVERIFY(writePlainLargePng(path, true));
         QVERIFY(Licasa::fastPngBaseEligible(path, policy.maximumImagePixels()));
         std::atomic_bool cancelled{false};
         const auto direct = Licasa::readFastPngPreview(
             path, QSize(1000, 1000), policy.maximumImagePixels(), 8 * 1024 * 1024, &cancelled);
+        QCOMPARE(direct.fullBase.format(), QImage::Format_ARGB32);
         QCOMPARE(direct.fullBase.pixelColor(2500, 2500), QColor(210, 40, 90, 120));
         QVERIFY(direct.fullBase.colorSpace() == QColorSpace(QColorSpace::SRgb));
 #else
@@ -255,6 +344,7 @@ class AsyncImageProviderTest final : public QObject {
 
         const QString base =
             QStringLiteral("1/") + QString::fromLatin1(QUrl::toPercentEncoding(path));
+        QVERIFY(!provider.hasDecodedFullBase(url));
         std::unique_ptr<QQuickImageResponse> preview(provider.requestImageResponse(
             base + QStringLiteral("?licasa_stage=preview"), QSize(1200, 1200)));
         provider.waitForPendingWork();
@@ -262,6 +352,7 @@ class AsyncImageProviderTest final : public QObject {
         std::unique_ptr<QQuickTextureFactory> previewTexture(preview->textureFactory());
         QVERIFY(previewTexture != nullptr);
         QCOMPARE(previewTexture->image().size(), QSize(1200, 1200));
+        QVERIFY(provider.hasDecodedFullBase(url));
         const quint64 hitsBeforeFull = provider.decodedBaseCacheHitCount();
 
         std::unique_ptr<QQuickImageResponse> full(
@@ -277,9 +368,35 @@ class AsyncImageProviderTest final : public QObject {
         QVERIFY(std::abs(displayed.blue() - 90) <= 1);
         QCOMPARE(displayed.alpha(), 120);
         QVERIFY(provider.decodedBaseCacheHitCount() > hitsBeforeFull);
+        provider.releasePictureResources();
+        provider.waitForPendingWork();
+        QVERIFY(!provider.hasDecodedFullBase(url));
     }
 
 #ifdef LICASA_HAVE_FAST_PNG_PREVIEW
+    void largePngGetsBoundedNearbyPreview()
+    {
+        QTemporaryDir settings;
+        QTemporaryDir images;
+        QVERIFY(settings.isValid());
+        QVERIFY(images.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        Licasa::ViewerPreferences preferences;
+        preferences.setMaximumImageMegapixels(40);
+        Licasa::ImageResourcePolicy policy(preferences);
+        Licasa::AsyncImageProvider provider(policy);
+        const QString path = images.filePath(QStringLiteral("neighbor.png"));
+        QVERIFY(writePlainLargePng(path, false));
+        const QUrl url = QUrl::fromLocalFile(path);
+
+        provider.prepareNearbyPreviews({url}, QSize(1000, 1000), 384);
+        QTRY_VERIFY_WITH_TIMEOUT(provider.hasNearbyPreview(url), 5000);
+        QVERIFY(provider.nearbyPreviewBytes() <= 5 * 1024 * 1024);
+        provider.releasePictureResources();
+        provider.waitForPendingWork();
+    }
+
     void fastPngRgbPreviewRespectsPixelsAndCancellation()
     {
         QTemporaryDir images;
@@ -292,9 +409,18 @@ class AsyncImageProviderTest final : public QObject {
                                                         8 * 1024 * 1024, &cancelled);
         QCOMPARE(decoded.preview.size(), QSize(1000, 1000));
         QCOMPARE(decoded.fullBase.size(), QSize(5000, 5000));
+        QCOMPARE(decoded.preview.format(), QImage::Format_RGB32);
+        QCOMPARE(decoded.fullBase.format(), QImage::Format_RGB32);
         QCOMPARE(decoded.preview.pixelColor(500, 500), QColor(210, 40, 90));
         QCOMPARE(decoded.fullBase.pixelColor(2500, 2500), QColor(210, 40, 90));
+        const QImage nearby = Licasa::readFastPngNearbyPreview(path, QSize(1000, 1000), 40000000,
+                                                               8 * 1024 * 1024, &cancelled);
+        QCOMPARE(nearby.size(), QSize(1000, 1000));
+        QCOMPARE(nearby.pixelColor(500, 500), QColor(210, 40, 90));
         cancelled.store(true);
+        QVERIFY(Licasa::readFastPngNearbyPreview(path, QSize(1000, 1000), 40000000, 8 * 1024 * 1024,
+                                                 &cancelled)
+                    .isNull());
         QVERIFY(Licasa::readFastPngPreview(path, QSize(1000, 1000), 40000000, 8 * 1024 * 1024,
                                            &cancelled)
                     .preview.isNull());

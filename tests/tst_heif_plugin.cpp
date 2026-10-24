@@ -21,6 +21,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <algorithm>
 #include <atomic>
 #include <libheif/heif.h>
 #include <memory>
@@ -162,18 +163,48 @@ class HeifPluginTest final : public QObject {
                 qunsetenv("LICASA_HEIF_DECODE_WORKERS");
             }
         });
-        const auto decode = [&](const char* workers) {
+        const auto decode = [&](const char* workers, quint64 budget) {
             qputenv("LICASA_HEIF_DECODE_WORKERS", workers);
             QImageReader reader(fixture("grid-48mp.heic"));
-            Contract::configure(reader, 100'000'000);
+            Contract::configure(reader, budget);
             reader.setScaledSize(QSize(1200, 900));
             return reader.read();
         };
-        const QImage serial = decode("0");
+        const QImage serial = decode("0", 100'000'000);
         QVERIFY(!serial.isNull());
-        const QImage parallel = decode("20");
+        const QImage parallel = decode("20", 100'000'000);
         QVERIFY(!parallel.isNull());
         QCOMPARE(parallel, serial);
+        const QImage boundedParallel = decode("20", 2'400'000);
+        QVERIFY(!boundedParallel.isNull());
+        QCOMPARE(boundedParallel, serial);
+    }
+
+    void consecutiveScaledAndFullGridReadsKeepMemoryLimits()
+    {
+        const QByteArray previous = qgetenv("LICASA_HEIF_DECODE_WORKERS");
+        const bool wasSet = qEnvironmentVariableIsSet("LICASA_HEIF_DECODE_WORKERS");
+        const auto restore = qScopeGuard([&] {
+            if (wasSet) {
+                qputenv("LICASA_HEIF_DECODE_WORKERS", previous);
+            } else {
+                qunsetenv("LICASA_HEIF_DECODE_WORKERS");
+            }
+        });
+        qputenv("LICASA_HEIF_DECODE_WORKERS", "20");
+        // Full and scaled requests run consecutively in the viewer. Let tile
+        // producers finish ahead of the painter, then reuse their contexts'
+        // allocator addresses in the next request. Limits must remain active.
+        for (int cycle = 0; cycle < 6; ++cycle) {
+            QImageReader reader(fixture("grid-48mp.heic"));
+            Contract::configure(reader, 100'000'000);
+            const QSize target = cycle % 2 == 0 ? QSize(1200, 900) : QSize(8000, 6000);
+            reader.setScaledSize(target);
+            const QImage image = reader.read();
+            QVERIFY2(!image.isNull(), qPrintable(codecError(reader) + reader.errorString()));
+            QCOMPARE(image.size(), target);
+            QVERIFY(reader.text("Backend").contains("1.23.4"));
+        }
     }
 
     void pinnedLibheifVersion()
@@ -445,6 +476,27 @@ class HeifPluginTest final : public QObject {
         QVERIFY(!reader.device()->property(Contract::decodedFullBaseProperty).isValid());
     }
 
+    void nearbyCacheUsesBoundedHeifPreviews()
+    {
+        Licasa::AsyncImageProvider provider(*policy_);
+        const QUrl withThumbnail = QUrl::fromLocalFile(fixture("grid-48mp-preview.heic"));
+        provider.prepareNearbyPreviews({withThumbnail}, QSize(1200, 900), 8192);
+        QTRY_VERIFY_WITH_TIMEOUT(provider.hasNearbyPreview(withThumbnail), 5000);
+        QCOMPARE(provider.nearbyPreviewCount(), qsizetype(1));
+        QVERIFY(provider.nearbyPreviewBytes() <= 8 * 1024 * 1024);
+
+        const QUrl withoutThumbnail = QUrl::fromLocalFile(fixture("single-48mp.heic"));
+        provider.prepareNearbyPreviews({withoutThumbnail}, QSize(1200, 900), 8192);
+        provider.waitForPendingWork();
+        QVERIFY(!provider.hasNearbyPreview(withoutThumbnail));
+
+        const QUrl tiled = QUrl::fromLocalFile(fixture("grid-48mp.heic"));
+        provider.prepareNearbyPreviews({tiled}, QSize(1200, 900), 8192);
+        QTRY_VERIFY_WITH_TIMEOUT(provider.hasNearbyPreview(tiled), 5000);
+        QCOMPARE(provider.nearbyPreviewCount(), qsizetype(1));
+        QVERIFY(provider.nearbyPreviewBytes() <= 8 * 1024 * 1024);
+    }
+
     void singleCodedImageUsesAuthoritativePixelLimit()
     {
         QImageReader preview(fixture("single-48mp.heic"));
@@ -467,6 +519,7 @@ class HeifPluginTest final : public QObject {
         {
             QImageReader admitted(fixture("single-48mp.heic"));
             Contract::configure(admitted, policy_->maximumImagePixels());
+            admitted.device()->setProperty(Contract::retainFullBaseProperty, true);
             admitted.setScaledSize(QSize(1200, 900));
             const QImage result = admitted.read();
             preferences_->setMaximumImageMegapixels(25);
@@ -474,6 +527,21 @@ class HeifPluginTest final : public QObject {
             QCOMPARE(result.size(), QSize(1200, 900));
             QCOMPARE(admitted.device()->property("_licasaNativeRasterPixels").toULongLong(),
                      quint64(48'000'000));
+            const QImage fullBase =
+                admitted.device()->property(Contract::decodedFullBaseProperty).value<QImage>();
+            QVERIFY(!fullBase.isNull());
+            const QImage reference =
+                fullBase.scaled(result.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            int largestDifference = 0;
+            for (int y = 0; y < result.height(); ++y) {
+                const uchar* actual = result.constScanLine(y);
+                const uchar* expected = reference.constScanLine(y);
+                for (int x = 0; x < result.width() * 4; ++x) {
+                    largestDifference =
+                        std::max(largestDifference, qAbs(int(actual[x]) - int(expected[x])));
+                }
+            }
+            QVERIFY(largestDifference <= 1);
         }
     }
 

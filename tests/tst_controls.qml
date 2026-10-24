@@ -1359,6 +1359,30 @@ Item {
         compare(viewport.pendingImageSlot, -1)
     }
 
+    function test_alreadyFailedPreviewStartsFallbackWithoutErrorFrame() {
+        const viewport = createTemporaryObject(imageViewportComponent, visualRoot, {
+            "providerSource": ""
+        })
+        verify(viewport)
+        const image = findChild(viewport, "staticImageA")
+        const unavailable = "file:///no-such-licasa-preview.png"
+        const fallback = Qt.resolvedUrl("../assets/licasa.png")
+        wait(0)
+        image.source = unavailable
+        tryCompare(image, "status", Image.Error, 5000)
+
+        const failureSpy = createSpy(viewport, "imageRequestFailed")
+        viewport.imageRequestFailed.connect(function() { viewport.sourceOverride = fallback })
+        viewport.providerSource = unavailable
+        viewport.sourceOverride = unavailable
+        viewport.requestCurrentImage()
+
+        compare(failureSpy.count, 1)
+        compare(viewport.pendingImageSlot, -1)
+        compare(viewport.imageStatus, Image.Loading)
+        tryCompare(viewport, "imageStatus", Image.Ready, 5000)
+    }
+
     function test_parallelFullImageWaitsForPreviewThenPromotes() {
         const viewport = createTemporaryObject(imageViewportComponent, visualRoot, {
             "parallelFullResolutionEnabled": true

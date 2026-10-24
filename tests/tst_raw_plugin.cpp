@@ -5,6 +5,7 @@
 #include "imaging/image_decode_contract.h"
 #include "imaging/image_probe.h"
 #include "imaging/image_resource_policy.h"
+#include "imaging/parallel_rgb_to_argb.h"
 #include "plugins/raw_stream.h"
 
 #include <QBuffer>
@@ -62,6 +63,26 @@ QImage pattern(int w, int h)
 class RawPluginTest final : public QObject {
     Q_OBJECT
   private slots:
+    void parallelRgbConversionMatchesQt()
+    {
+        // Exceed the parallel threshold, and use a width with RGB888 row padding.
+        QImage source(5001, 3200, QImage::Format_RGB888);
+        QVERIFY(!source.isNull());
+        source.setColorSpace(QColorSpace::SRgb);
+        for (int y = 0; y < source.height(); ++y) {
+            uchar* row = source.scanLine(y);
+            for (int x = 0; x < source.width(); ++x) {
+                row[3 * x] = uchar((x + y) & 255);
+                row[3 * x + 1] = uchar((3 * x + y) & 255);
+                row[3 * x + 2] = uchar((x + 7 * y) & 255);
+            }
+        }
+        const QImage expected = source.convertToFormat(QImage::Format_ARGB32);
+        const QImage actual = Licasa::parallelRgbToArgb(source);
+        QCOMPARE(actual.format(), QImage::Format_ARGB32);
+        QCOMPARE(actual.colorSpace(), source.colorSpace());
+        QCOMPARE(actual, expected);
+    }
     void initTestCase()
     {
         QVERIFY(settings_.isValid());
@@ -92,6 +113,7 @@ class RawPluginTest final : public QObject {
             QVERIFY2(reader.canRead(), qPrintable(error(reader)));
             QCOMPARE(reader.size(), rotated ? QSize(1536, 2048) : QSize(2048, 1536));
             QVERIFY(reader.device()->property(Contract::previewFirstProperty).toBool());
+            QVERIFY(reader.device()->property(Contract::rawPreviewCandidateProperty).toBool());
             QVERIFY(!reader.device()->property("_licasaRawDemosaic").isValid());
             QVERIFY(!reader.supportsAnimation());
             image = reader.read();
@@ -143,6 +165,8 @@ class RawPluginTest final : public QObject {
     {
         QImageReader preview(fixture("no-preview.dng"));
         Contract::configure(preview, 25000000);
+        QCOMPARE(preview.size(), QSize(2048, 1536));
+        QVERIFY(!preview.device()->property(Contract::rawPreviewCandidateProperty).toBool());
         QVERIFY(preview.canRead());
         QVERIFY(preview.read().isNull());
         QVERIFY(error(preview).contains("embedded preview"));

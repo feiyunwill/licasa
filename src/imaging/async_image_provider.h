@@ -33,6 +33,7 @@ class AsyncImageProvider final : public QQuickAsyncImageProvider {
     qsizetype nearbyPreviewBytes() const;
     quint64 nearbyPreviewHitCount() const;
     quint64 decodedBaseCacheHitCount() const;
+    bool hasDecodedFullBase(const QUrl& url) const;
     bool hasNearbyPreview(const QUrl& url) const;
     void markParallelPreviewPresented(const QString& pairId);
     // Qt may retain image providers past QQmlEngine teardown. Drain every

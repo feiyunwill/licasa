@@ -5,10 +5,10 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(Licasa
-        VERSION 0.6.0
+        VERSION 0.7.0
         LANGUAGES CXX
 )
-set(LICASA_RELEASE_DATE "2026-10-20")
+set(LICASA_RELEASE_DATE "2026-10-24")
 
 # Qt 6 requires C++17 or newer.
 set(CMAKE_CXX_STANDARD 17)
@@ -369,6 +369,17 @@ add_library(licasa_image_services STATIC
         src/imaging/image_processing.h)
 target_include_directories(licasa_image_services PUBLIC src)
 target_link_libraries(licasa_image_services PUBLIC Qt6::Quick)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LICASA_WEBP QUIET IMPORTED_TARGET libwebp)
+endif()
+if(LICASA_WEBP_FOUND)
+    target_sources(licasa_image_services PRIVATE
+            src/imaging/fast_webp_preview.cpp
+            src/imaging/fast_webp_preview.h)
+    target_link_libraries(licasa_image_services PUBLIC PkgConfig::LICASA_WEBP)
+    target_compile_definitions(licasa_image_services PRIVATE LICASA_HAVE_FAST_WEBP_PREVIEW=1)
+endif()
 find_package(PNG 1.6 QUIET)
 if(PNG_FOUND)
     set(LICASA_HAVE_FAST_PNG_PREVIEW TRUE)

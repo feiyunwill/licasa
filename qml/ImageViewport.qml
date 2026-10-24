@@ -420,6 +420,8 @@ Item {
         // same key. Reassigning an unchanged source emits no status change.
         if (target.status === Image.Ready)
             completeImageRequest(targetSlot)
+        else if (target.status === Image.Error)
+            failImageRequest(targetSlot)
     }
 
     function releaseStaticImages() {
@@ -505,10 +507,15 @@ Item {
             imageRequestTimer.restart()
             return
         }
+        const failedKey = pendingRequestKey
         pendingImageSlot = -1
         pendingRequestKey = ""
-        imageLoadFailed = activeImageSlot < 0
+        imageLoadFailed = false
         root.imageRequestFailed()
+        // The owner can switch to a RAW fallback or an already-running full
+        // request in the failure callback. Keep the loading state for that
+        // request instead of briefly showing the failed preview's error card.
+        imageLoadFailed = activeImageSlot < 0 && requestKey() === failedKey
     }
 
     onProviderSourceChanged: {

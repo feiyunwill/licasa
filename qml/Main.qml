@@ -213,10 +213,14 @@ Window {
     property url rawMetadataProbeUrl: ""
     property real rawMetadataProbeDurationMs: 0.0
     property bool reusablePngBase: false
+    property bool decodedFullBaseReady: false
     readonly property real previewOverscanFactor: 1.20
     readonly property real previewTriggerRatio: 1.15
     readonly property int maxPreviewDecodeExtent: 8192
-    readonly property int fullResUpgradeDelayMs: isLargeTiff() ? 120 : (isLargeJpeg() ? 350 : 80)
+    // Give rapid arrow browsing time to cancel a costly full JPEG decode.
+    // Promote sooner only when preview decoding has already retained the full raster.
+    readonly property int fullResUpgradeDelayMs: isLargeTiff() ? 120
+        : isLargeJpeg() ? 220 : decodedFullBaseReady ? 32 : 80
 
     readonly property real maxWheelDeltaPerEvent: 120
 
@@ -1224,6 +1228,7 @@ Window {
         rawMetadataProbeUrl = ""
         rawMetadataProbeDurationMs = 0.0
         reusablePngBase = false
+        decodedFullBaseReady = false
         rawMetadataProbeTimer.stop()
         imageViewport.releaseStaticImages()
 
@@ -1433,6 +1438,7 @@ Window {
             prepareForImageOpen()
 
         residentImageUrl = u
+        decodedFullBaseReady = false
         if (looksLikeRaw(u)) {
             // Do not synchronously probe LibRaw before the asynchronous preview
             // provider starts. Prime a conservative preview-first state and
@@ -1531,6 +1537,13 @@ Window {
                 root.viewerPreferences.maximumImageMemoryMiB)
             return
         }
+        const name = FileUrls.fileName(root.residentImageUrl).toLowerCase()
+        if (root.previewPhase && root.lastBrowseAtMs === 0
+                && root.fullResolutionRenderingEnabled
+                && !root.imageLimitedToPreview && !root.currentImageAnimated
+                && (name.endsWith(".avif") || name.endsWith(".webp"))
+                && root.currentImageMegapixels() >= 4)
+            return
         windowManager.prepareNearbyPreviews(
             formatSupport.nearbyImages(root.residentImageUrl, 5, root.lastBrowseDirection),
             root.browseBurstActive ? root.burstPreviewSize()
@@ -2714,6 +2727,8 @@ Window {
         }
 
         onImageReady: {
+            root.decodedFullBaseReady = root.previewPhase
+                && root.windowManager.hasDecodedFullBase(root.residentImageUrl)
             if (root.browseAwaitingFrame)
                 root.browseImageReadyForFrame = true
             if (!root.animatedPlaybackActive)

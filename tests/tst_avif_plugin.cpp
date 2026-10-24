@@ -1,4 +1,5 @@
 #include "app/application_settings.h"
+#include "imaging/async_image_provider.h"
 #include "imaging/codec_plugins.h"
 #include "imaging/image_decode_contract.h"
 #include "imaging/image_resource_policy.h"
@@ -10,6 +11,7 @@
 #include <QImageIOHandler>
 #include <QImageReader>
 #include <QList>
+#include <QQuickTextureFactory>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
@@ -218,6 +220,7 @@ class AvifPluginTest final : public QObject {
     {
         QImageReader reader(fixture("uhd-4k-3840x2160.avif"));
         Contract::configure(reader, policy_->maximumImagePixels());
+        reader.device()->setProperty(Contract::retainFullBaseProperty, true);
         QCOMPARE(reader.size(), QSize(3840, 2160));
         reader.setScaledSize(QSize(640, 360));
         const QImage image = reader.read();
@@ -226,6 +229,68 @@ class AvifPluginTest final : public QObject {
         QCOMPARE(reader.device()->property("_licasaNativeRasterPixels").toULongLong(),
                  quint64(3840) * 2160);
         QVERIFY(reader.text("PreviewPath").contains("full native raster required"));
+        const QImage fullBase =
+            reader.device()->property(Contract::decodedFullBaseProperty).value<QImage>();
+        QCOMPARE(fullBase.size(), QSize(3840, 2160));
+        QImageReader fullReader(fixture("uhd-4k-3840x2160.avif"));
+        Contract::configure(fullReader, policy_->maximumImagePixels());
+        QCOMPARE(fullBase, fullReader.read());
+    }
+
+    void boundedNearbyPreviewIsReused()
+    {
+        const QUrl url = QUrl::fromLocalFile(fixture("full-hd-1920x1080.avif"));
+        const QSize target(1200, 675);
+        Licasa::AsyncImageProvider minimumBudget(*policy_);
+        minimumBudget.prepareNearbyPreviews({url}, target, 384);
+        minimumBudget.waitForPendingWork();
+        QVERIFY(minimumBudget.hasNearbyPreview(url));
+        QVERIFY(minimumBudget.nearbyPreviewBytes() <= 48 * 1024 * 1024);
+
+        Licasa::AsyncImageProvider provider(*policy_);
+        provider.prepareNearbyPreviews({url}, target, 8192);
+        provider.waitForPendingWork();
+        QVERIFY(provider.hasNearbyPreview(url));
+        QVERIFY(provider.nearbyPreviewBytes() <= 96 * 1024 * 1024);
+
+        const quint64 hitsBefore = provider.nearbyPreviewHitCount();
+        const QString request = QStringLiteral("1/") +
+                                QString::fromLatin1(QUrl::toPercentEncoding(url.toLocalFile())) +
+                                QStringLiteral("?licasa_stage=preview");
+        std::unique_ptr<QQuickImageResponse> response(
+            provider.requestImageResponse(request, target));
+        provider.waitForPendingWork();
+        QVERIFY2(response->errorString().isEmpty(), qPrintable(response->errorString()));
+        std::unique_ptr<QQuickTextureFactory> texture(response->textureFactory());
+        QVERIFY(texture);
+        QCOMPARE(texture->textureSize(), target);
+        QVERIFY(provider.nearbyPreviewHitCount() > hitsBefore);
+    }
+
+    void largeNearbyPreviewRespectsDistanceAndMemory()
+    {
+        QTemporaryDir images;
+        QVERIFY(images.isValid());
+        QList<QUrl> urls;
+        for (int index = 0; index < 4; ++index) {
+            const QString path = images.filePath(QStringLiteral("neighbor-%1.avif").arg(index));
+            QVERIFY(QFile::copy(fixture("uhd-4k-3840x2160.avif"), path));
+            urls.append(QUrl::fromLocalFile(path));
+        }
+        const QSize target(1200, 675);
+        Licasa::AsyncImageProvider tooSmall(*policy_);
+        tooSmall.prepareNearbyPreviews(urls, target, 384);
+        tooSmall.waitForPendingWork();
+        QVERIFY(!tooSmall.hasNearbyPreview(urls.first()));
+
+        Licasa::AsyncImageProvider provider(*policy_);
+        provider.prepareNearbyPreviews(urls, target, 8192);
+        provider.waitForPendingWork();
+        for (int index = 0; index < 3; ++index) {
+            QVERIFY(provider.hasNearbyPreview(urls.at(index)));
+        }
+        QVERIFY(!provider.hasNearbyPreview(urls.at(3)));
+        QVERIFY(provider.nearbyPreviewBytes() <= 96 * 1024 * 1024);
     }
 
     void selectedPixelLimitRejectsBeforeAv1Decode()

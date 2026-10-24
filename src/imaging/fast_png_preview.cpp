@@ -74,9 +74,9 @@ bool fastPngBaseEligible(const QString& path, quint64 maximumPixels)
     return file.open(QIODevice::ReadOnly) && eligibleSize(file, maximumPixels).isValid();
 }
 
-FastPngPreview readFastPngPreview(const QString& path, const QSize& previewSize,
+static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
                                   quint64 maximumPixels, qsizetype maximumPreviewBytes,
-                                  const std::atomic_bool* cancelled)
+                                  const std::atomic_bool* cancelled, bool retainFullBase)
 {
     FastPngPreview result;
     if (maximumPreviewBytes <= 0 || !previewSize.isValid() || previewSize.isEmpty() ||
@@ -139,9 +139,18 @@ FastPngPreview readFastPngPreview(const QString& path, const QSize& previewSize,
         png_destroy_read_struct(&png, &info, nullptr);
         return {};
     }
-    result.fullBase = QImage(sourceSize, QImage::Format_ARGB32);
-    result.preview = QImage(previewSize, QImage::Format_ARGB32);
-    if (result.fullBase.isNull() || result.preview.isNull() ||
+    const QImage::Format imageFormat =
+        colorType == PNG_COLOR_TYPE_RGB ? QImage::Format_RGB32 : QImage::Format_ARGB32;
+    if (retainFullBase) {
+        result.fullBase = QImage(sourceSize, imageFormat);
+    }
+    QImage row;
+    if (!retainFullBase) {
+        row = QImage(int(width), 1, imageFormat);
+    }
+    result.preview = QImage(previewSize, imageFormat);
+    if ((retainFullBase && result.fullBase.isNull()) || (!retainFullBase && row.isNull()) ||
+        result.preview.isNull() ||
         result.fullBase.sizeInBytes() >
             qsizetype(ImageDecodeContract::maximumDecodedBaseCacheBytes) ||
         result.preview.sizeInBytes() > maximumPreviewBytes) {
@@ -155,11 +164,11 @@ FastPngPreview readFastPngPreview(const QString& path, const QSize& previewSize,
             png_destroy_read_struct(&png, &info, nullptr);
             return {};
         }
-        png_read_row(png, result.fullBase.scanLine(int(y)), nullptr);
+        uchar* decodedRow = retainFullBase ? result.fullBase.scanLine(int(y)) : row.scanLine(0);
+        png_read_row(png, decodedRow, nullptr);
         while (previewY < previewSize.height() &&
                quint64(previewY) * height / quint64(previewSize.height()) == y) {
-            const auto* source =
-                reinterpret_cast<const QRgb*>(result.fullBase.constScanLine(int(y)));
+            const auto* source = reinterpret_cast<const QRgb*>(decodedRow);
             auto* output = reinterpret_cast<QRgb*>(result.preview.scanLine(previewY));
             for (int x = 0; x < previewSize.width(); ++x) {
                 const int sourceX = int(quint64(x) * width / quint64(previewSize.width()));
@@ -175,7 +184,9 @@ FastPngPreview readFastPngPreview(const QString& path, const QSize& previewSize,
         return {};
     }
     const QColorSpace displaySpace(QColorSpace::SRgb);
-    result.fullBase.setColorSpace(displaySpace);
+    if (retainFullBase) {
+        result.fullBase.setColorSpace(displaySpace);
+    }
     result.preview.setColorSpace(displaySpace);
     if (tracing) {
         qInfo().noquote() << "[Licasa] Fast PNG preview:" << "source=" << sourceSize
@@ -183,6 +194,21 @@ FastPngPreview readFastPngPreview(const QString& path, const QSize& previewSize,
                           << "elapsed_ms=" << double(timer.nsecsElapsed()) / 1000000.0;
     }
     return result;
+}
+
+FastPngPreview readFastPngPreview(const QString& path, const QSize& previewSize,
+                                  quint64 maximumPixels, qsizetype maximumPreviewBytes,
+                                  const std::atomic_bool* cancelled)
+{
+    return readFastPng(path, previewSize, maximumPixels, maximumPreviewBytes, cancelled, true);
+}
+
+QImage readFastPngNearbyPreview(const QString& path, const QSize& previewSize,
+                                quint64 maximumPixels, qsizetype maximumPreviewBytes,
+                                const std::atomic_bool* cancelled)
+{
+    return readFastPng(path, previewSize, maximumPixels, maximumPreviewBytes, cancelled, false)
+        .preview;
 }
 
 } // namespace Licasa

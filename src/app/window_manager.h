@@ -68,6 +68,7 @@ class WindowManager final : public QObject {
     Q_INVOKABLE QObject* ensurePreferredCoverFrameCoordinator(QObject* windowObject);
     Q_INVOKABLE void releasePictureResources();
     Q_INVOKABLE void releasePictureResourcesForNavigation(const QUrl& nextImage);
+    Q_INVOKABLE bool hasDecodedFullBase(const QUrl& url) const;
     Q_INVOKABLE void prepareNearbyPreviews(const QList<QUrl>& urls, const QSize& requestedSize,
                                            int maximumImageMemoryMiB);
     Q_INVOKABLE void markParallelPreviewPresented(const QString& pairId);

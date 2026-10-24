@@ -38,6 +38,10 @@ inline bool reusablePngFullBase(const QSize& size, QImage::Format format,
 }
 
 inline constexpr char pixelBudgetProperty[] = "_licasaPixelBudget";
+// A native-scaling reader may admit a large source while bounding the raster
+// each attempted reduced-resolution decode is allowed to allocate.
+inline constexpr char scaledDecodePixelBudgetProperty[] = "_licasaScaledDecodePixelBudget";
+inline constexpr char boundedJp2ScaleProperty[] = "_licasaBoundedJp2Scale";
 inline constexpr char cancellationProperty[] = "_licasaCancellation";
 inline constexpr char errorProperty[] = "_licasaCodecError";
 inline constexpr char fullDetailProperty[] = "_licasaFullDetail";
@@ -46,6 +50,10 @@ inline constexpr char rawInteractiveDevelopmentProperty[] = "_licasaRawInteracti
 inline constexpr char previewFirstProperty[] = "_licasaPreviewFirst";
 inline constexpr char sensorSizeProperty[] = "_licasaSensorSize";
 inline constexpr char embeddedPreviewSizeProperty[] = "_licasaEmbeddedPreviewSize";
+// RAW metadata can rule out a thumbnail even if its dimensions are unknown.
+inline constexpr char rawPreviewCandidateProperty[] = "_licasaRawPreviewCandidate";
+// HEIF can construct a scaled grid preview from individual bounded tiles.
+inline constexpr char boundedGridPreviewProperty[] = "_licasaBoundedGridPreview";
 // A RAW plugin may admit an oversized embedded JPEG only through native,
 // bounded JPEG scaling; this flag lets the selected-preview worker use it.
 inline constexpr char scalableEmbeddedJpegProperty[] = "_licasaScalableEmbeddedJpeg";

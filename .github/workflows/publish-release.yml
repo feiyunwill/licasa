@@ -1,4 +1,4 @@
-name: Approve beta and mark GitHub release latest
+name: Approve stable and mark GitHub release latest
 
 on:
   workflow_dispatch:
@@ -63,7 +63,7 @@ jobs:
           version="$(sed -n "s/^version: '\([0-9.]*\)'$/\1/p" snap/snapcraft.yaml)"
           test -n "$version"
           python3 tools/check_release_version.py \
-            --channel beta --expected-sha "$SOURCE_SHA" \
+            --channel stable --expected-sha "$SOURCE_SHA" \
             --source-ref "refs/tags/v$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release_tag=v$version" >> "$GITHUB_OUTPUT"
@@ -145,6 +145,7 @@ jobs:
   publish_snap:
     needs: [preflight, verify_artifacts]
     runs-on: ubuntu-24.04
+    # Retain the existing credential and approval environment.
     environment: snap-beta
     timeout-minutes: 30
     steps:
@@ -155,37 +156,38 @@ jobs:
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
         run: test -n "$SNAPCRAFT_STORE_CREDENTIALS"
-      - name: Promote the checked revision to beta
+      - name: Promote the checked revision to stable
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
           REVISION: ${{ needs.verify_artifacts.outputs.revision }}
         run: |
           sudo snap install snapcraft --classic
-          snapcraft release licasa "$REVISION" beta
-      - name: Install and verify beta
+          snapcraft release licasa "$REVISION" stable
+      - name: Install and verify stable
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           REVISION: ${{ needs.verify_artifacts.outputs.revision }}
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
         run: |
           sudo snap set system experimental.user-daemons=false
-          sudo snap install --channel=beta licasa
+          sudo snap install --channel=stable licasa
           for attempt in $(seq 1 10); do
             if [ "$(snap list licasa | awk 'NR == 2 {print $3}')" = "$REVISION" ]; then
               break
             fi
             sleep 20
-            sudo snap refresh --channel=beta licasa
+            sudo snap refresh --channel=stable licasa
           done
           test "$(snap list licasa | awk 'NR == 2 {print $3}')" = "$REVISION"
           python3 tools/verify_snap_install.py --version "$VERSION" \
             --source-sha "$SOURCE_SHA" \
-            --output build/qualification/snap-beta-smoke.json
+            --output build/qualification/snap-stable-smoke.json
       - uses: actions/upload-artifact@v7
         with:
-          name: licasa-beta-snap-smoke
-          path: build/qualification/snap-beta-smoke.json
+          name: licasa-stable-snap-smoke
+          path: build/qualification/snap-stable-smoke.json
           if-no-files-found: error
+          retention-days: 7
 
   finalize_github_release:
     needs: [preflight, verify_artifacts, publish_snap]
@@ -221,7 +223,7 @@ jobs:
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
         run: |
           python3 tools/check_release_version.py \
-            --channel beta --expected-sha "$SOURCE_SHA" \
+            --channel stable --expected-sha "$SOURCE_SHA" \
             --source-ref "refs/tags/v$VERSION"
           (cd dist/deb && sha256sum --check "licasa_${VERSION}-1_amd64.deb.sha256")
           (cd dist/appimage && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256")
@@ -250,7 +252,7 @@ jobs:
             cat "dist/arch/PKGBUILD.sha256"
             cat "dist/snap/licasa_${VERSION}_amd64.snap.sha256"
             printf "\`\`\`\n"
-            printf "\nSnap beta revision: %s.\n" "$SNAP_REVISION"
+            printf "\nSnap stable revision: %s.\n" "$SNAP_REVISION"
             printf "Source commit: \`%s\`.\n" "$SOURCE_SHA"
           } > dist/release-notes.md
           gh release edit "$RELEASE_TAG" --prerelease=false --latest \

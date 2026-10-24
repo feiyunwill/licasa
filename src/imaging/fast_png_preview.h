@@ -21,4 +21,10 @@ FastPngPreview readFastPngPreview(const QString& path, const QSize& previewSize,
                                   quint64 maximumPixels, qsizetype maximumPreviewBytes,
                                   const std::atomic_bool* cancelled);
 
+// Background nearby previews keep only the sampled raster, never the large
+// decoded base used for selected-image full-detail promotion.
+QImage readFastPngNearbyPreview(const QString& path, const QSize& previewSize,
+                                quint64 maximumPixels, qsizetype maximumPreviewBytes,
+                                const std::atomic_bool* cancelled);
+
 } // namespace Licasa

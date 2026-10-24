@@ -1,6 +1,6 @@
 name: licasa
 title: Licasa
-version: '0.6.0'
+version: '0.7.0'
 summary: Fast, image-first photo viewer and editor
 description: |
   Licasa opens photographs in a focused, image-sized window. Browse, zoom,
@@ -12,7 +12,7 @@ issues: https://github.com/sanxchep/licasa/issues
 license: BSD-2-Clause
 icon: assets/licasa.png
 base: core24
-grade: devel
+grade: stable
 confinement: strict
 
 # Licasa's private Qt and codec runtimes are required by the viewer and its
@@ -74,6 +74,7 @@ parts:
       - libjpeg-turbo8-dev
       - libtiff-dev
       - libpng-dev
+      - libwebp-dev
       - libxext-dev
       - qt6-base-private-dev
       - qt6-declarative-private-dev
@@ -135,16 +136,29 @@ parts:
     override-build: |
       set -eu
       cd "$CRAFT_PART_BUILD"
-      python3 tools/build_ubuntu_deb.py --jobs 4
-      deb="build/qualification/deb/licasa_${SNAPCRAFT_PROJECT_VERSION}-1_amd64.deb"
-      (cd build/qualification/deb && sha256sum --check "licasa_${SNAPCRAFT_PROJECT_VERSION}-1_amd64.deb.sha256")
-      test "$(dpkg-deb --field "$deb" Version)" = "${SNAPCRAFT_PROJECT_VERSION}-1"
-      dpkg-deb -x "$deb" "$CRAFT_PART_INSTALL"
-      test -x "$CRAFT_PART_INSTALL/usr/bin/licasa"
-      readelf -d "$CRAFT_PART_INSTALL/usr/bin/licasa" | grep -Fq 'libXext.so.6'
       source_commit="$(git -C "$CRAFT_PROJECT_DIR" rev-parse HEAD)"
       if [ -n "$(git -C "$CRAFT_PROJECT_DIR" status --porcelain)" ]; then
         source_commit="${source_commit}-dirty"
       fi
+      deb_name="licasa_${SNAPCRAFT_PROJECT_VERSION}-1_amd64.deb"
+      if [ -d "$CRAFT_PROJECT_DIR/snap-input" ]; then
+        # Release CI supplies only the already tested Debian artifact from this
+        # same workflow run. A mismatched receipt fails; it never falls back.
+        input="$CRAFT_PROJECT_DIR/snap-input"
+        test "$(cat "$input/source-commit.txt")" = "$source_commit"
+        case "$source_commit" in *-dirty) exit 1 ;; esac
+        deb="$input/$deb_name"
+        (cd "$input" && sha256sum --check "$deb_name.sha256")
+      else
+        # Standalone Snapcraft builds retain the full qualified source recipe.
+        python3 tools/build_ubuntu_deb.py --jobs 4
+        deb="build/qualification/deb/$deb_name"
+        (cd build/qualification/deb && sha256sum --check "$deb_name.sha256")
+      fi
+      test "$(dpkg-deb --field "$deb" Version)" = "${SNAPCRAFT_PROJECT_VERSION}-1"
+      test "$(dpkg-deb --field "$deb" Architecture)" = amd64
+      dpkg-deb -x "$deb" "$CRAFT_PART_INSTALL"
+      test -x "$CRAFT_PART_INSTALL/usr/bin/licasa"
+      readelf -d "$CRAFT_PART_INSTALL/usr/bin/licasa" | grep -Fq 'libXext.so.6'
       install -d "$CRAFT_PART_INSTALL/usr/share/licasa"
       printf '%s\n' "$source_commit" > "$CRAFT_PART_INSTALL/usr/share/licasa/source-commit"

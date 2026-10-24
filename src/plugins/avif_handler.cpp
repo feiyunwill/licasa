@@ -1,5 +1,6 @@
 #include "container_signatures.h"
 #include "imaging/image_decode_contract.h"
+#include "imaging/parallel_smooth_scale.h"
 
 #include <QByteArray>
 #include <QColorSpace>
@@ -542,7 +543,16 @@ class AvifHandler final : public QImageIOHandler {
         }
 
         if (target != image.size()) {
-            image = image.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            if (!sequencePresent_ && device() &&
+                device()->property(Contract::retainFullBaseProperty).toBool() &&
+                image.sizeInBytes() > 0 &&
+                quint64(image.sizeInBytes()) <= Contract::maximumDecodedBaseCacheBytes) {
+                // AVIF has already decoded the complete RGB raster for this
+                // preview. Share it with the provider's full-detail cache.
+                device()->setProperty(Contract::decodedFullBaseProperty,
+                                      QVariant::fromValue(image));
+            }
+            image = Licasa::parallelSmoothScale(image, target);
             if (image.isNull()) {
                 return fail("AVIF scaled output allocation failed.");
             }

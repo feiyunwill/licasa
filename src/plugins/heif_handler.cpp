@@ -1,5 +1,6 @@
 #include "container_signatures.h"
 #include "imaging/image_decode_contract.h"
+#include "imaging/parallel_smooth_scale.h"
 
 #include <QColorSpace>
 #include <QImageIOHandler>
@@ -11,9 +12,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -24,6 +28,8 @@ constexpr quint64 metadataBudget = 4 * 1024 * 1024;
 constexpr qsizetype maximumMotionXmpBytes = 1024 * 1024;
 constexpr int maximumMetadataBlocks = 64;
 constexpr int maximumSequenceFrames = 100000;
+// Preview and full-detail requests can overlap; bound their combined HEIF contexts.
+constexpr int maximumParallelGridWorkers = 8;
 using Context = std::unique_ptr<heif_context, decltype(&heif_context_free)>;
 using Handle = std::unique_ptr<heif_image_handle, decltype(&heif_image_handle_release)>;
 using Track = std::unique_ptr<heif_track, decltype(&heif_track_release)>;
@@ -541,6 +547,17 @@ class HeifHandler final : public QImageIOHandler {
             return fail("HEIF declares invalid image dimensions.");
         }
         device()->setProperty(Contract::embeddedPreviewSizeProperty, largestThumbnailSize());
+        heif_image_tiling tiling{};
+        tiling.version = 1;
+        const auto tilingError = heif_image_handle_get_image_tiling(handle_.get(), 1, &tiling);
+        const quint64 tileCount = quint64(tiling.num_columns) * tiling.num_rows;
+        const quint64 tilePixels = quint64(tiling.tile_width) * tiling.tile_height;
+        if (tilingError.code == heif_error_Ok && (tiling.num_columns > 1 || tiling.num_rows > 1) &&
+            tiling.num_columns > 0 && tiling.num_rows > 0 && tiling.tile_width > 0 &&
+            tiling.tile_height > 0 && tileCount <= 512 && tilePixels <= 64'000'000 / tileCount &&
+            tilePixels <= pixelBudget_) {
+            device()->setProperty(Contract::boundedGridPreviewProperty, true);
+        }
         return true;
     }
     int sequenceDelayMs(uint32_t duration) const
@@ -773,7 +790,7 @@ class HeifHandler final : public QImageIOHandler {
             device()->setProperty(Contract::decodedFullBaseProperty, QVariant::fromValue(image));
         }
         if (image.size() != target) {
-            image = image.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            image = Licasa::parallelSmoothScale(image, target);
         }
         if (image.isNull() || cancelled()) {
             return false;
@@ -783,13 +800,14 @@ class HeifHandler final : public QImageIOHandler {
     }
     struct GridTile {
         Pixels pixels{nullptr, heif_image_release};
+        bool ready = false;
     };
     enum class ParallelGridResult { NotUsed, Ready, Failed };
 
-    ParallelGridResult decodeGridTilesParallel(const heif_image_tiling& grid,
-                                               const heif_decoding_options* options,
-                                               const heif_security_limits* limits,
-                                               std::vector<GridTile>* tiles)
+    template <typename DrawTile>
+    ParallelGridResult
+    decodeGridTilesParallel(const heif_image_tiling& grid, const heif_decoding_options* options,
+                            const heif_security_limits* limits, DrawTile&& drawTile)
     {
         const quint64 tileCount = quint64(grid.num_columns) * grid.num_rows;
         const qint64 inputBytes = device()->size();
@@ -797,11 +815,21 @@ class HeifHandler final : public QImageIOHandler {
         // compressed source avoids concurrent seeks on the caller's QIODevice.
         // Keep the serial path for unusually large files and small grids.
         if (tileCount < 8 || tileCount > 512 || inputBytes <= 0 || inputBytes > 256 * 1024 * 1024 ||
-            quint64(inputBytes) > pixelBudget_ * 4 ||
-            quint64(grid.tile_width) * grid.tile_height * tileCount > pixelBudget_ * 2 ||
-            decodeWorkerLimit() < 4 || !device()->seek(0)) {
+            quint64(inputBytes) > pixelBudget_ * 4 || decodeWorkerLimit() < 4 ||
+            !device()->seek(0)) {
             return ParallelGridResult::NotUsed;
         }
+
+        const quint64 tilePixels = quint64(grid.tile_width) * grid.tile_height;
+        const int workers = int(
+            std::min<quint64>({quint64(decodeWorkerLimit()), quint64(maximumParallelGridWorkers),
+                               tileCount, pixelBudget_ / tilePixels}));
+        if (workers < 4) {
+            return ParallelGridResult::NotUsed;
+        }
+        // Decode ahead by at most two tiles per worker. The painter consumes
+        // them in grid order, so large grids never retain every decoded tile.
+        const size_t window = size_t(std::min<quint64>(tileCount, quint64(workers) * 2));
 
         const QByteArray compressed = device()->read(inputBytes);
         if (compressed.size() != inputBytes) {
@@ -811,10 +839,23 @@ class HeifHandler final : public QImageIOHandler {
             return ParallelGridResult::Failed;
         }
 
-        std::vector<GridTile> decodedTiles(static_cast<size_t>(tileCount));
-        const int workers = std::min<int>(decodeWorkerLimit(), int(tileCount));
+        // Queued heif_images retain accounting handles belonging to their
+        // decoder context. Keep every worker context alive until the painter
+        // has released all tiles, including cancellation/error leftovers.
+        // Otherwise an allocator can reuse a context address while an old
+        // tile still decrements its memory counters.
+        std::vector<Context> workerContexts;
+        workerContexts.reserve(size_t(workers));
+        for (int worker = 0; worker < workers; ++worker) {
+            workerContexts.emplace_back(nullptr, heif_context_free);
+        }
+        std::vector<GridTile> decodedTiles(window);
         std::vector<QString> workerErrors(static_cast<size_t>(workers));
-        std::atomic<quint64> nextTile{0};
+        std::mutex tileMutex;
+        std::condition_variable tileAvailable;
+        std::condition_variable tileReady;
+        quint64 nextTile = 0;
+        quint64 consumed = 0;
         std::atomic_bool stopped{false};
         const auto decodeTiles = [&](int workerIndex) {
             const auto reject = [&](const heif_error& error) {
@@ -822,12 +863,17 @@ class HeifHandler final : public QImageIOHandler {
                     error.message ? QString::fromUtf8(error.message)
                                   : QStringLiteral("HEIF tile decode failed.");
                 stopped.store(true, std::memory_order_relaxed);
+                tileAvailable.notify_all();
+                tileReady.notify_all();
             };
-            Context context(heif_context_alloc(), heif_context_free);
+            Context& context = workerContexts[size_t(workerIndex)];
+            context.reset(heif_context_alloc());
             if (!context) {
                 workerErrors[size_t(workerIndex)] =
                     QStringLiteral("HEIF tile context could not be allocated.");
                 stopped.store(true, std::memory_order_relaxed);
+                tileAvailable.notify_all();
+                tileReady.notify_all();
                 return;
             }
             const auto error = heif_context_set_security_limits(context.get(), limits);
@@ -874,14 +920,28 @@ class HeifHandler final : public QImageIOHandler {
                 workerErrors[size_t(workerIndex)] =
                     QStringLiteral("HEIF tile options could not be allocated.");
                 stopped.store(true, std::memory_order_relaxed);
+                tileAvailable.notify_all();
+                tileReady.notify_all();
                 return;
             }
             heif_decoding_options_copy(workerOptions.get(), options);
             workerOptions->num_codec_threads = 1;
             while (!stopped.load(std::memory_order_relaxed) && !cancelled()) {
-                const quint64 index = nextTile.fetch_add(1, std::memory_order_relaxed);
-                if (index >= tileCount) {
-                    break;
+                quint64 index = 0;
+                {
+                    std::unique_lock lock(tileMutex);
+                    tileAvailable.wait_for(lock, std::chrono::milliseconds(25), [&] {
+                        return stopped.load(std::memory_order_relaxed) || cancelled() ||
+                               nextTile >= tileCount || nextTile - consumed < window;
+                    });
+                    if (stopped.load(std::memory_order_relaxed) || cancelled() ||
+                        nextTile >= tileCount) {
+                        return;
+                    }
+                    if (nextTile - consumed >= window) {
+                        continue;
+                    }
+                    index = nextTile++;
                 }
                 heif_image* decoded = nullptr;
                 const auto tileError = heif_image_handle_decode_image_tile(
@@ -895,7 +955,13 @@ class HeifHandler final : public QImageIOHandler {
                     reject(tileError);
                     return;
                 }
-                decodedTiles[size_t(index)].pixels.reset(decoded);
+                {
+                    std::lock_guard lock(tileMutex);
+                    GridTile& slot = decodedTiles[size_t(index % window)];
+                    slot.pixels.reset(decoded);
+                    slot.ready = true;
+                }
+                tileReady.notify_all();
             }
         };
 
@@ -908,7 +974,41 @@ class HeifHandler final : public QImageIOHandler {
             }
         } catch (const std::system_error&) {
             stopped.store(true, std::memory_order_relaxed);
+            tileAvailable.notify_all();
+            tileReady.notify_all();
             launched = false;
+        }
+        bool drawn = launched;
+        if (launched) {
+            for (quint64 index = 0; index < tileCount; ++index) {
+                Pixels pixels(nullptr, heif_image_release);
+                {
+                    std::unique_lock lock(tileMutex);
+                    while (!decodedTiles[size_t(index % window)].ready &&
+                           !stopped.load(std::memory_order_relaxed) && !cancelled()) {
+                        tileReady.wait_for(lock, std::chrono::milliseconds(25));
+                    }
+                    GridTile& slot = decodedTiles[size_t(index % window)];
+                    if (!slot.ready || stopped.load(std::memory_order_relaxed) || cancelled()) {
+                        drawn = false;
+                        break;
+                    }
+                    pixels = std::move(slot.pixels);
+                    slot.ready = false;
+                    consumed = index + 1;
+                }
+                tileAvailable.notify_all();
+                if (!drawTile(std::move(pixels), quint32(index % grid.num_columns),
+                              quint32(index / grid.num_columns))) {
+                    drawn = false;
+                    break;
+                }
+            }
+        }
+        if (!drawn) {
+            stopped.store(true, std::memory_order_relaxed);
+            tileAvailable.notify_all();
+            tileReady.notify_all();
         }
         for (auto& thread : threads) {
             thread.join();
@@ -925,8 +1025,7 @@ class HeifHandler final : public QImageIOHandler {
                 return ParallelGridResult::Failed;
             }
         }
-        *tiles = std::move(decodedTiles);
-        return ParallelGridResult::Ready;
+        return drawn ? ParallelGridResult::Ready : ParallelGridResult::Failed;
     }
     bool readGrid(const heif_image_tiling& grid, const QSize& target,
                   const heif_decoding_options* options, QImage* output)
@@ -971,17 +1070,8 @@ class HeifHandler final : public QImageIOHandler {
             return true;
         };
 
-        std::vector<GridTile> tiles;
-        switch (decodeGridTilesParallel(grid, options, limits, &tiles)) {
+        switch (decodeGridTilesParallel(grid, options, limits, drawTile)) {
         case ParallelGridResult::Ready:
-            for (quint64 index = 0; index < tiles.size(); ++index) {
-                if (!tiles[size_t(index)].pixels ||
-                    !drawTile(std::move(tiles[size_t(index)].pixels),
-                              quint32(index % grid.num_columns),
-                              quint32(index / grid.num_columns))) {
-                    return false;
-                }
-            }
             return !cancelled();
         case ParallelGridResult::Failed:
             return false;

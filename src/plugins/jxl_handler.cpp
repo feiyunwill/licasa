@@ -1,5 +1,6 @@
 #include "codec_buffer.h"
 #include "imaging/image_decode_contract.h"
+#include "imaging/parallel_smooth_scale.h"
 
 #include <QColorSpace>
 #include <QImageIOHandler>
@@ -250,7 +251,7 @@ class JxlHandler final : public QImageIOHandler {
                                           QVariant::fromValue(raster));
                 }
                 if (target != rasterSize) {
-                    raster = raster.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                    raster = Licasa::parallelSmoothScale(raster, target);
                 }
                 if (raster.isNull() || cancelled()) {
                     return false;
@@ -451,7 +452,11 @@ class JxlHandler final : public QImageIOHandler {
             bool validOverride = false;
             const int override =
                 qEnvironmentVariableIntValue("LICASA_JXL_DECODE_WORKERS", &validOverride);
-            const int workers = validOverride ? std::clamp(override, 1, available) : available;
+            // Leave cores for scaling the preview and subsequent full-detail
+            // work. Very large images may still use every available worker.
+            const quint64 pixels = quint64(size_.width()) * size_.height();
+            const int defaultWorkers = pixels <= 64'000'000 ? std::min(available, 16) : available;
+            const int workers = validOverride ? std::clamp(override, 1, available) : defaultWorkers;
             if (!validOverride || override != 0) {
                 parallelRunner_.reset(JxlThreadParallelRunnerCreate(nullptr, size_t(workers)));
             }

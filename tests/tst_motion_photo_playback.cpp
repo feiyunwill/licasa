@@ -435,6 +435,56 @@ class MotionPhotoPlaybackTest final : public QObject {
         policy.processingMutex().unlock();
     }
 
+    void portableBoundedPlayback_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<QSize>("displaySize");
+        QTest::newRow("unrotated") << QStringLiteral("qt-runtime-0deg.mp4") << QSize(320, 240);
+        QTest::newRow("display-matrix-90deg")
+            << QStringLiteral("qt-runtime-90deg.mp4") << QSize(240, 320);
+    }
+
+    void portableBoundedPlayback()
+    {
+        QFETCH(QString, name);
+        QFETCH(QSize, displaySize);
+        const QString path = QStringLiteral(LICASA_TEST_ASSET_DIR "/modern/motion/") + name;
+        QVERIFY(QFileInfo(path).isFile());
+        PhotoAssetInfo asset;
+        asset.kind = PhotoAssetKind::MotionPhoto;
+        asset.sourceUrl = QUrl::fromLocalFile(path);
+        asset.motion =
+            MotionComponent{{0, quint64(QFileInfo(path).size())}, QStringLiteral("video/mp4"), {}};
+        ViewerPreferences preferences;
+        preferences.setMaximumImageMegapixels(25);
+        ImageResourcePolicy policy(preferences);
+        MotionPhotoPlayback playback(policy);
+        MotionPhotoFrameRaster frame;
+        playback.setFrameReadyCallback([&](auto value) { frame = std::move(value); });
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            frame = {};
+            playback.play(asset);
+            QTRY_VERIFY_WITH_TIMEOUT(frame.isValid() || !playback.error().isEmpty(), 10000);
+            QVERIFY2(playback.error().isEmpty(), qPrintable(playback.error()));
+            QVERIFY2(qualifiedPrivateFfmpegIsMapped(),
+                     "The matching private FFmpeg plugin is required");
+            QCOMPARE(frame.size, displaySize);
+            QVERIFY(playback.duration() >= 1900 && playback.duration() <= 2100);
+            playback.pause();
+            QTRY_VERIFY(!playback.playing());
+            frame = {};
+            playback.seek(800);
+            // A frame ending exactly at 800 ms is still before this boundary.
+            // A positionChanged notification must not satisfy frame delivery.
+            QTRY_VERIFY_WITH_TIMEOUT(frame.isValid() && frame.timestampUs >= 800000, 10000);
+            QVERIFY(!playback.playing());
+            playback.stop();
+            QTRY_VERIFY(!playback.active());
+            QVERIFY(policy.processingMutex().tryLock());
+            policy.processingMutex().unlock();
+        }
+    }
+
     void playbackSeekStopAndReopen()
     {
 #ifndef LICASA_HEIC_MOTION_FIXTURE

@@ -61,6 +61,18 @@ class ExtraImageReadersTest final : public QObject {
 #endif
     }
 
+    void jp2ReducedDecodeHonorsItsAllocationCap()
+    {
+#ifdef LICASA_TEST_JP2
+        QImageReader reader(fixture("jp2-check.jp2"));
+        Licasa::ImageDecodeContract::configure(reader, 1000);
+        reader.setScaledSize(QSize(3, 2));
+        reader.device()->setProperty(Licasa::ImageDecodeContract::scaledDecodePixelBudgetProperty,
+                                     QVariant::fromValue(quint64(1)));
+        QVERIFY(reader.read().isNull());
+#endif
+    }
+
     void registrationAndExactPixels()
     {
         QImageReader referenceReader(fixture("qoi-check.ppm"));

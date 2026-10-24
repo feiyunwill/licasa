@@ -6,13 +6,23 @@
 #include <QImage>
 #include <QImageIOHandler>
 #include <QImageIOPlugin>
+#include <QThread>
 #include <QtEndian>
 
 #include <openjpeg.h>
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <memory>
+#include <system_error>
+#include <thread>
+#include <vector>
+
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 namespace {
 constexpr uchar jp2Signature[] = {0, 0, 0, 12, 0x6a, 0x50, 0x20, 0x20, 13, 10, 0x87, 10};
@@ -148,7 +158,7 @@ struct Decoder {
     std::unique_ptr<opj_image_t, decltype(&opj_image_destroy)> image{nullptr, &opj_image_destroy};
 
     bool open(QFile* file, OPJ_CODEC_FORMAT format, int reduce,
-              quint64 maximumDecodedPixels = maximumSourcePixels)
+              quint64 maximumDecodedPixels = maximumSourcePixels, int maximumThreads = 8)
     {
         if (!file || !file->seek(0)) {
             return false;
@@ -172,7 +182,8 @@ struct Decoder {
         if (!opj_setup_decoder(codec.get(), &parameters)) {
             return false;
         }
-        opj_codec_set_threads(codec.get(), std::min(8, std::max(1, opj_get_num_cpus())));
+        opj_codec_set_threads(codec.get(),
+                              std::min(maximumThreads, std::max(1, opj_get_num_cpus())));
         opj_image_t* rawImage = nullptr;
         if (!opj_read_header(stream.get(), codec.get(), &rawImage)) {
             return false;
@@ -221,7 +232,14 @@ int toByte(const opj_image_comp_t& component, int x, int y, int width, int heigh
 
 class Jp2Handler final : public QImageIOHandler {
   public:
-    bool canRead() const override { return formatFromSignature(device()) != OPJ_CODEC_UNKNOWN; }
+    bool canRead() const override
+    {
+        const bool supported = formatFromSignature(device()) != OPJ_CODEC_UNKNOWN;
+        if (supported && device()) {
+            device()->setProperty(Licasa::ImageDecodeContract::boundedJp2ScaleProperty, true);
+        }
+        return supported;
+    }
 
     bool supportsOption(ImageOption option) const override
     {
@@ -270,6 +288,15 @@ class Jp2Handler final : public QImageIOHandler {
             return false;
         }
         const quint64 budget = Licasa::ImageDecodeContract::pixelBudget(device());
+        const QVariant scaledBudgetValue =
+            device()->property(Licasa::ImageDecodeContract::scaledDecodePixelBudgetProperty);
+        const quint64 decodedBudget = scaledBudgetValue.isValid()
+                                          ? std::min(budget, scaledBudgetValue.toULongLong())
+                                          : budget;
+        // A compact nearby codestream decodes quickly with one worker and
+        // avoids competing with the selected image. Larger compressed inputs
+        // still need parallel decode to finish before the next navigation.
+        const int decodeThreads = scaledBudgetValue.isValid() && file->size() < 1024 * 1024 ? 1 : 8;
         if (!Licasa::ImageDecodeContract::allows(sourceSize, budget)) {
             return false;
         }
@@ -286,7 +313,8 @@ class Jp2Handler final : public QImageIOHandler {
         std::unique_ptr<Decoder> decoder;
         for (int attempt = reduce; attempt >= 0; --attempt) {
             auto candidate = std::make_unique<Decoder>();
-            if (candidate->open(file, format, attempt, budget) && candidate->decode()) {
+            if (candidate->open(file, format, attempt, decodedBudget, decodeThreads) &&
+                candidate->decode()) {
                 decoder = std::move(candidate);
                 break;
             }
@@ -310,25 +338,124 @@ class Jp2Handler final : public QImageIOHandler {
         if (image.isNull()) {
             return false;
         }
-        for (int y = 0; y < height; ++y) {
-            if ((y & 31) == 0 && Licasa::ImageDecodeContract::cancelled(device())) {
-                return false;
+        const bool directEightBit = source.color_space != OPJ_CLRSPC_SYCC &&
+                                    (source.numcomps == 1 || source.numcomps >= 3) &&
+                                    std::all_of(source.comps, source.comps + source.numcomps,
+                                                [width, height](const opj_image_comp_t& component) {
+                                                    return component.data &&
+                                                           component.w == OPJ_UINT32(width) &&
+                                                           component.h == OPJ_UINT32(height) &&
+                                                           component.prec == 8 && !component.sgnd;
+                                                });
+#if defined(__linux__)
+        const long pageSize =
+            directEightBit && quint64(width) * height >= 16'000'000 ? sysconf(_SC_PAGESIZE) : 0;
+        std::atomic_bool discardEnabled{false};
+        const auto discardConvertedRows = [&](int first, int last) {
+            if (pageSize <= 0) {
+                return;
             }
-            auto* row = reinterpret_cast<QRgb*>(image.scanLine(y));
-            for (int x = 0; x < width; ++x) {
-                int r = toByte(source.comps[0], x, y, width, height);
-                int g = source.numcomps == 1 ? r : toByte(source.comps[1], x, y, width, height);
-                int b = source.numcomps == 1 ? r : toByte(source.comps[2], x, y, width, height);
-                if (source.color_space == OPJ_CLRSPC_SYCC && source.numcomps >= 3) {
-                    const int cb = g - 128;
-                    const int cr = b - 128;
-                    g = std::clamp(r - ((88 * cb + 183 * cr) >> 8), 0, 255);
-                    b = std::clamp(r + ((454 * cb) >> 8), 0, 255);
-                    r = std::clamp(r + ((359 * cr) >> 8), 0, 255);
+            const uintptr_t page = uintptr_t(pageSize);
+            for (OPJ_UINT32 component = 0; component < source.numcomps; ++component) {
+                const auto* samples = source.comps[component].data;
+                const uintptr_t base = reinterpret_cast<uintptr_t>(samples);
+                const uintptr_t begin = base + size_t(first) * size_t(width) * sizeof(*samples);
+                const uintptr_t end = base + size_t(last) * size_t(width) * sizeof(*samples);
+                const uintptr_t alignedBegin = ((begin + page - 1) / page) * page;
+                const uintptr_t alignedEnd = (end / page) * page;
+                if (alignedBegin < alignedEnd) {
+                    // OpenJPEG has finished decoding. These complete sample
+                    // pages cannot be read again after their RGB rows are made.
+                    madvise(reinterpret_cast<void*>(alignedBegin), alignedEnd - alignedBegin,
+                            MADV_DONTNEED);
                 }
-                const int a = alpha ? toByte(source.comps[3], x, y, width, height) : 255;
-                row[x] = qRgba(r, g, b, a);
             }
+        };
+#endif
+        uchar* const imageBits = image.bits();
+        const qsizetype stride = image.bytesPerLine();
+        const auto convertRows = [&](int first, int last) {
+#if defined(__linux__)
+            int blockStart = first;
+#endif
+            for (int y = first; y < last; ++y) {
+                if (first == 0 && last == height && (y & 31) == 0 &&
+                    Licasa::ImageDecodeContract::cancelled(device())) {
+                    return;
+                }
+                auto* row = reinterpret_cast<QRgb*>(imageBits + qsizetype(y) * stride);
+                const size_t sourceRow = size_t(y) * size_t(width);
+                for (int x = 0; x < width; ++x) {
+                    int r, g, b, a;
+                    if (directEightBit) {
+                        const size_t index = sourceRow + size_t(x);
+                        r = std::clamp(source.comps[0].data[index], 0, 255);
+                        g = source.numcomps == 1 ? r
+                                                 : std::clamp(source.comps[1].data[index], 0, 255);
+                        b = source.numcomps == 1 ? r
+                                                 : std::clamp(source.comps[2].data[index], 0, 255);
+                        a = alpha ? std::clamp(source.comps[3].data[index], 0, 255) : 255;
+                    } else {
+                        r = toByte(source.comps[0], x, y, width, height);
+                        g = source.numcomps == 1 ? r : toByte(source.comps[1], x, y, width, height);
+                        b = source.numcomps == 1 ? r : toByte(source.comps[2], x, y, width, height);
+                        if (source.color_space == OPJ_CLRSPC_SYCC && source.numcomps >= 3) {
+                            const int cb = g - 128;
+                            const int cr = b - 128;
+                            g = std::clamp(r - ((88 * cb + 183 * cr) >> 8), 0, 255);
+                            b = std::clamp(r + ((454 * cb) >> 8), 0, 255);
+                            r = std::clamp(r + ((359 * cr) >> 8), 0, 255);
+                        }
+                        a = alpha ? toByte(source.comps[3], x, y, width, height) : 255;
+                    }
+                    row[x] = qRgba(r, g, b, a);
+                }
+#if defined(__linux__)
+                if (pageSize > 0 && ((y - first + 1) % 128 == 0 || y + 1 == last)) {
+                    if (discardEnabled.load(std::memory_order_relaxed)) {
+                        discardConvertedRows(blockStart, y + 1);
+                    }
+                    blockStart = y + 1;
+                }
+#endif
+            }
+        };
+        const int workers =
+            directEightBit && quint64(width) * height >= 16'000'000
+                ? std::min({8, std::max(1, QThread::idealThreadCount()), height / 256})
+                : 1;
+        if (workers > 1) {
+            std::vector<std::thread> threads;
+            threads.reserve(size_t(workers));
+            bool launched = true;
+            try {
+                for (int worker = 0; worker < workers; ++worker) {
+                    threads.emplace_back(convertRows, worker * height / workers,
+                                         (worker + 1) * height / workers);
+                }
+            } catch (const std::system_error&) {
+                launched = false;
+            }
+#if defined(__linux__)
+            discardEnabled.store(launched, std::memory_order_relaxed);
+#endif
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            if (!launched) {
+#if defined(__linux__)
+                discardEnabled.store(true, std::memory_order_relaxed);
+#endif
+                convertRows(0, height);
+            }
+        } else {
+#if defined(__linux__)
+            discardEnabled.store(true, std::memory_order_relaxed);
+#endif
+            convertRows(0, height);
+        }
+        if (Licasa::ImageDecodeContract::cancelled(device())) {
+            return false;
         }
         if (source.icc_profile_buf && source.icc_profile_len > 0 &&
             source.icc_profile_len <= 4 * 1024 * 1024) {

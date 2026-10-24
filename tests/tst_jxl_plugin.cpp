@@ -18,6 +18,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -90,6 +91,37 @@ class JxlPluginTest final : public QObject {
         const QImage parallel = decode("20");
         QVERIFY(!parallel.isNull());
         QCOMPARE(parallel, serial);
+        qunsetenv("LICASA_JXL_DECODE_WORKERS");
+        QImageReader defaultReader(fixture("large-48mp.jxl"));
+        Contract::configure(defaultReader, 100'000'000);
+        const QImage defaultDecode = defaultReader.read();
+        QVERIFY(!defaultDecode.isNull());
+        QCOMPARE(defaultDecode, serial);
+    }
+    void largePreviewKeepsSmoothScalingQuality()
+    {
+        QImageReader reader(fixture("large-48mp.jxl"));
+        Contract::configure(reader, 100'000'000);
+        reader.device()->setProperty(Contract::retainFullBaseProperty, true);
+        reader.setScaledSize(QSize(1200, 900));
+        const QImage preview = reader.read();
+        QVERIFY2(!preview.isNull(), qPrintable(codecError(reader)));
+        const QImage full =
+            reader.device()->property(Contract::decodedFullBaseProperty).value<QImage>();
+        QVERIFY(!full.isNull());
+        const QImage reference =
+            full.scaled(preview.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        QCOMPARE(preview.size(), reference.size());
+        int largestDifference = 0;
+        for (int y = 0; y < preview.height(); ++y) {
+            const uchar* actual = preview.constScanLine(y);
+            const uchar* expected = reference.constScanLine(y);
+            for (int x = 0; x < preview.width() * 4; ++x) {
+                largestDifference =
+                    std::max(largestDifference, qAbs(int(actual[x]) - int(expected[x])));
+            }
+        }
+        QVERIFY(largestDifference <= 1);
     }
     void metadataAndOversizedAdmission()
     {
@@ -184,6 +216,20 @@ class JxlPluginTest final : public QObject {
         Contract::configure(full, 200000);
         QVERIFY(full.read().isNull());
         QVERIFY(codecError(full).contains("limit"));
+    }
+    void nearbyCacheUsesOnlyBoundedEmbeddedPreview()
+    {
+        Licasa::AsyncImageProvider provider(*policy_);
+        const QUrl withPreview = QUrl::fromLocalFile(fixture("embedded-preview.jxl"));
+        provider.prepareNearbyPreviews({withPreview}, QSize(400, 300), 8192);
+        QTRY_VERIFY_WITH_TIMEOUT(provider.hasNearbyPreview(withPreview), 5000);
+        QCOMPARE(provider.nearbyPreviewCount(), qsizetype(1));
+        QVERIFY(provider.nearbyPreviewBytes() <= 8 * 1024 * 1024);
+
+        const QUrl withoutPreview = QUrl::fromLocalFile(fixture("large-48mp.jxl"));
+        provider.prepareNearbyPreviews({withoutPreview}, QSize(400, 300), 8192);
+        provider.waitForPendingWork();
+        QVERIFY(!provider.hasNearbyPreview(withoutPreview));
     }
     void admittedLargeRasterIsReportedHonestly()
     {

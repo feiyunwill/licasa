@@ -343,6 +343,11 @@ void WindowManager::releasePictureResourcesForNavigation(const QUrl& nextImage)
     }
 }
 
+bool WindowManager::hasDecodedFullBase(const QUrl& url) const
+{
+    return imageProvider_ && imageProvider_->hasDecodedFullBase(url);
+}
+
 void WindowManager::prepareNearbyPreviews(const QList<QUrl>& urls, const QSize& requestedSize,
                                           int maximumImageMemoryMiB)
 {

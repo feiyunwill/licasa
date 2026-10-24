@@ -1,4 +1,5 @@
 #include "imaging/image_decode_contract.h"
+#include "imaging/parallel_rgb_to_argb.h"
 #include "raw_stream.h"
 
 #include <QBuffer>
@@ -155,7 +156,7 @@ class RawHandler final : public QImageIOHandler {
             !qEnvironmentVariableIsSet("LICASA_RAW_RGB888_BASE_LEGACY")) {
             QElapsedTimer convertTimer;
             convertTimer.start();
-            QImage converted = image.convertToFormat(QImage::Format_ARGB32);
+            QImage converted = Licasa::parallelRgbToArgb(image);
             if (converted.isNull()) {
                 return fail(QStringLiteral(
                     "There is not enough memory to prepare the interactive RAW raster."));
@@ -346,11 +347,13 @@ class RawHandler final : public QImageIOHandler {
             // compare it with LibRaw's documented default (largest) preview.
             QSize bestListedPreview;
             bool bestListedScalableJpeg = false;
+            bool listedPreviewCandidate = false;
             for (int i = 0; i < count_; ++i) {
                 const auto& thumb = list.thumblist[order_[i]];
                 if (!admissible(thumb)) {
                     continue;
                 }
+                listedPreviewCandidate = true;
                 const QSize candidate(thumb.twidth, thumb.theight);
                 if (!candidate.isValid() || candidate.isEmpty()) {
                     continue;
@@ -365,10 +368,13 @@ class RawHandler final : public QImageIOHandler {
             const QSize defaultPreview(defaultThumb.twidth, defaultThumb.theight);
             const qint64 thumbLimit = qint64(
                 std::min<quint64>(workingBytes_, quint64(std::numeric_limits<qint64>::max())));
+            const bool defaultPreviewCandidate = raw.thumbOK(thumbLimit) != 0 &&
+                                                 defaultThumb.tlength >= 64 &&
+                                                 defaultThumb.tlength <= workingBytes_;
+            device()->setProperty(Contract::rawPreviewCandidateProperty,
+                                  listedPreviewCandidate || defaultPreviewCandidate);
             const bool defaultPreviewUsable =
-                raw.thumbOK(thumbLimit) != 0 && defaultThumb.tlength >= 64 &&
-                defaultThumb.tlength <= workingBytes_ && defaultPreview.isValid() &&
-                !defaultPreview.isEmpty() &&
+                defaultPreviewCandidate && defaultPreview.isValid() && !defaultPreview.isEmpty() &&
                 (Contract::allows(defaultPreview, maximumPixels_) ||
                  scalableJpegPreview(defaultPreview, defaultThumb.tlength, defaultThumb.tformat));
 
@@ -724,7 +730,8 @@ class RawHandler final : public QImageIOHandler {
         const auto previewFlagValue =
             device()->property(Contract::previewPresentedProperty).value<quintptr>();
         const auto* previewPresented = reinterpret_cast<const std::atomic_bool*>(previewFlagValue);
-        if (interactiveDevelopment && previewPresented) {
+        if (interactiveDevelopment && previewPresented &&
+            device()->property(Contract::rawPreviewCandidateProperty).toBool()) {
             QElapsedTimer previewWait;
             previewWait.start();
             while (!previewPresented->load(std::memory_order_acquire) &&

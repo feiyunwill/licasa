@@ -17,12 +17,43 @@ on:
 permissions:
   contents: read
 
+# Superseded PR checks are disposable; release callers must finish their gates.
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  scope:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.scope.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+      - name: Detect documentation-only pull requests
+        id: scope
+        run: |
+          git diff --no-renames --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/changed-files"
+          python3 - "$RUNNER_TEMP/changed-files" "$GITHUB_OUTPUT" <<'PY'
+          from pathlib import Path
+          import sys
+          paths = Path(sys.argv[1]).read_bytes().split(b'\0')
+          build = any(path and not (path.endswith(b'.md') or path == b'LICENSE') for path in paths)
+          with open(sys.argv[2], 'a') as output:
+              output.write(f"build={str(build).lower()}\n")
+          PY
+
   test:
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result == 'skipped' || needs.scope.outputs.build == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         preset: ${{ fromJSON(inputs.presets || (github.event_name == 'pull_request' && '["release"]' || '["release","asan","ubsan"]')) }}
     steps:
@@ -32,8 +63,8 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ca-certificates git cmake make ninja-build g++ python3 \
-            pkg-config patch meson nasm clang-format-18 binutils libjpeg-turbo8-dev libtiff-dev libpng-dev \
+          sudo apt-get install -y --no-install-recommends ca-certificates git cmake make ninja-build g++ python3 ccache \
+            pkg-config patch meson nasm clang-format-18 binutils libjpeg-turbo8-dev libtiff-dev libpng-dev libwebp-dev \
             libx11-dev libxext-dev \
             qt6-base-dev qt6-declarative-dev qt6-svg-dev qt6-image-formats-plugins \
             qt6-base-private-dev qt6-declarative-private-dev qt6-shadertools-dev \
@@ -42,9 +73,36 @@ jobs:
             qml6-module-qtquick-dialogs qml6-module-qtquick-layouts
       - name: Check first-party C++ formatting
         run: python3 tools/check_code_style.py
+      - name: Fingerprint the installed dependency toolchain
+        id: toolchain
+        run: |
+          digest="$(dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Restore exact private dependencies
+        id: dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            build/codecs/prefix
+            build/deps/qt-backport-runtime
+          # No fallback keys: release/ASan/UBSan and ABI revisions stay separate.
+          key: native-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'cmake/strip_codec_rpath.cmake', '.github/workflows/ci.yml') }}
+      - name: Cache compiler outputs
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ccache
+          key: native-ccache-v1-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: native-ccache-v1-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-
+      - name: Configure bounded compiler caching
+        run: |
+          ccache --max-size=400M
+          echo 'CMAKE_C_COMPILER_LAUNCHER=ccache' >> "$GITHUB_ENV"
+          echo 'CMAKE_CXX_COMPILER_LAUNCHER=ccache' >> "$GITHUB_ENV"
       - name: Build the same-version Qt Quick cleanup backport
+        if: steps.dependencies.outputs.cache-hit != 'true'
         run: python3 tools/build_qt_backport.py --jobs "$(nproc)"
       - name: Build maintained native image codecs
+        if: steps.dependencies.outputs.cache-hit != 'true'
         env:
           PRESET: ${{ matrix.preset }}
         run: |
@@ -77,6 +135,7 @@ jobs:
         if: always()
         with:
           name: verification-${{ matrix.preset }}
+          retention-days: 7
           path: |
             build/${{ matrix.preset }}/Testing/Temporary/LastTest.log
             build/${{ matrix.preset }}/runtime-formats.json

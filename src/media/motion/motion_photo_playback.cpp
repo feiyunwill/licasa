@@ -724,7 +724,9 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                 if (previewSeek->active) {
                     const bool reachesTarget =
                         timestamp >= previewSeek->targetUs ||
-                        (endTimestamp >= 0 && endTimestamp >= previewSeek->targetUs);
+                        // Frame intervals are half-open: a frame ending at
+                        // the target belongs before it, not at the seek point.
+                        (endTimestamp >= 0 && endTimestamp > previewSeek->targetUs);
                     if (!reachesTarget) {
                         return;
                     }
