@@ -46,6 +46,7 @@ jobs:
       - name: Check installer regressions before building
         run: |
           python3 -B tests/test_appimage_installer.py -v
+          python3 -B tests/test_appimage_packaging.py -v
           bash -n packaging/install-licasa-appimage.sh
 
   verify_sanitizers:
@@ -79,13 +80,13 @@ jobs:
           cache-to: type=gha,scope=licasa-deb-builder,mode=min,ignore-error=true
       - name: Restore exact Ubuntu private dependencies
         id: dependencies
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: |
             build/release-dependencies/codecs
             build/release-dependencies/quick
             build/release-dependencies/ffmpeg
-          key: ubuntu-release-deps-v1-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'cmake/strip_codec_rpath.cmake', 'packaging/verify-fresh-build.sh', '.github/workflows/snapcraft-build.yml') }}
+          key: ubuntu-release-deps-v2-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'tools/build_ubuntu_deb.py', 'cmake/strip_codec_rpath.cmake', 'packaging/verify-fresh-build.sh') }}
       - name: Build and test from a clean Ubuntu 24.04 image
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
@@ -109,6 +110,15 @@ jobs:
             licasa-deb-builder:release bash -ec '
               dpkg-deb --extract "/output/licasa_${VERSION}-1_amd64.deb" /tmp/licasa-package
               python3 /source/tools/check_hardening.py /tmp/licasa-package/usr/bin/licasa'
+      - name: Save verified private dependencies before package installation checks
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            build/release-dependencies/codecs
+            build/release-dependencies/quick
+            build/release-dependencies/ffmpeg
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
       - name: Install deb on clean Ubuntu and decode samples
         env:
           VERSION: ${{ needs.preflight.outputs.version }}

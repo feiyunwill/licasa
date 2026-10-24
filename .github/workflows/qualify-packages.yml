@@ -38,6 +38,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends python3-pil
           /usr/bin/python3 -B -m unittest discover -s tests -p 'test_*qualification.py' -v
           /usr/bin/python3 -B tests/test_appimage_installer.py -v
+          /usr/bin/python3 -B tests/test_appimage_packaging.py -v
           bash -n packaging/install-licasa-appimage.sh
           python3 tools/check_public_files.py --history HEAD
           {

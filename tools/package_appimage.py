@@ -14,6 +14,9 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# linuxdeploy excludes these by default, but minimal desktops need our copies
+# for Qt's X11 plugins, libSM's UUID dependency and bundled FFmpeg/Pango.
+PORTABLE_RUNTIME_LIBRARIES = ("libSM.so.6", "libICE.so.6", "libuuid.so.1", "libfribidi.so.0")
 TOOLS = {
     "linuxdeploy-x86_64.AppImage": (
         "https://github.com/linuxdeploy/linuxdeploy/releases/download/"
@@ -102,6 +105,10 @@ def main() -> None:
     wl_shell_library = qt_libraries / "libQt6WlShellIntegration.so.6"
     if not wl_shell_library.is_file():
         raise RuntimeError("Missing Qt Wayland shell integration library; install qt6-wayland")
+    forced_libraries = (wl_shell_library, *(qt_libraries / name for name in PORTABLE_RUNTIME_LIBRARIES))
+    for library in forced_libraries:
+        if not library.is_file():
+            raise RuntimeError(f"Missing AppImage runtime library: {library}")
     with tempfile.TemporaryDirectory(prefix="licasa-appimage-", dir=output) as temporary:
         work = Path(temporary)
         appdir = work / "Licasa.AppDir"
@@ -124,8 +131,14 @@ def main() -> None:
                        ("libqoffscreen.so", *wayland_platforms)))
         linuxdeploy = str(tools_dir / "linuxdeploy-x86_64.AppImage")
         run([linuxdeploy, "--appdir", str(appdir), "--desktop-file", str(desktop),
-             "--icon-file", str(icon), "--library", str(wl_shell_library),
+             "--icon-file", str(icon),
+             *(argument for library in forced_libraries for argument in ("--library", str(library))),
              "--plugin", "qt"], env=env, cwd=work)
+        # Explicit --library requests override linuxdeploy's default exclusion
+        # list and retain its dependency and copyright-file deployment.
+        for library in forced_libraries:
+            if not (appdir / "usr/lib" / library.name).is_file():
+                raise RuntimeError(f"AppDir is missing the bundled runtime library: {library.name}")
         # Qt's QML plugins resolve Qt Quick through the top-level library path.
         # Point that name at our tested backport, rather than a second distro
         # Qt Quick copied by linuxdeploy.
