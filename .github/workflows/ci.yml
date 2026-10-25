@@ -33,6 +33,23 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  candidate_request:
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate the requested candidate before building
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          python3 tools/hosted_candidate.py --source-sha "$SOURCE_SHA" --expected-sha "$EXPECTED_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
   package_contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -181,9 +198,26 @@ jobs:
             build/${{ matrix.preset }}/viewer-lifecycle.json
 
   candidate_verification:
-    needs: [package_contract, test]
-    if: github.event_name == 'workflow_dispatch' && inputs.verify_candidate
+    needs: [candidate_request, package_contract, test]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.verify_candidate
+          && needs.candidate_request.result == 'success'
+          && needs.package_contract.result == 'success' && needs.test.result == 'success' }}
     uses: ./.github/workflows/verify-candidate.yml
     with:
       source_sha: ${{ github.sha }}
       expected_sha: ${{ inputs.expected_sha }}
+
+  candidate_result:
+    needs: [candidate_request, candidate_verification]
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.verify_candidate }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require complete candidate verification
+        env:
+          REQUEST_RESULT: ${{ needs.candidate_request.result }}
+          VERIFICATION_RESULT: ${{ needs.candidate_verification.result }}
+        run: |
+          test "$REQUEST_RESULT" = success
+          test "$VERIFICATION_RESULT" = success

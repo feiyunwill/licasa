@@ -46,8 +46,18 @@ class HostedCandidateTests(unittest.TestCase):
     def test_complete_contract_is_retained_and_cannot_authorize_promotion(self):
         workflow = (ROOT / ".github/workflows/verify-candidate.yml").read_text()
         caller = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertIn("needs: [package_contract, test]", caller)
-        self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.verify_candidate", caller)
+        candidate = caller.split("  candidate_verification:\n", 1)[1].split("  candidate_result:\n", 1)[0]
+        self.assertIn("needs: [candidate_request, package_contract, test]", candidate)
+        self.assertIn("!cancelled()", candidate)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.verify_candidate", candidate)
+        for prerequisite in ("candidate_request", "package_contract", "test"):
+            self.assertIn(f"needs.{prerequisite}.result == 'success'", candidate)
+        # A skipped PR-only ancestor must not suppress this job implicitly,
+        # and an omitted candidate run must not leave requested verification green.
+        result = caller.split("  candidate_result:\n", 1)[1]
+        self.assertIn("always()", result)
+        self.assertIn('test "$REQUEST_RESULT" = success', result)
+        self.assertIn('test "$VERIFICATION_RESULT" = success', result)
         self.assertIn("source_sha: ${{ github.sha }}", caller)
         self.assertIn("expected_sha: ${{ inputs.expected_sha }}", caller)
         self.assertIn("${{ fromJSON(needs.source.outputs.matrix) }}", workflow)
