@@ -23,7 +23,26 @@ Licasa is an image viewer and editor for the Linux desktop. It opens a photo fro
 
 If you try it, [report a bug or suggest a feature](https://github.com/sanxchep/licasa/issues/new).
 
+## In action
+
+Three short demos, recorded at original speed with **Background process** enabled. Each opening is shown continuously from the desktop's **Open** menu to the visible photo.
+
+**Open a photo** — From the desktop into the fullscreen viewer.
+
+![Opening a photo in Licasa at original speed](assets/demos/open-photo.gif)
+
+**Resize a floating window** — Open a photo, move it, and resize it on the desktop.
+
+![Opening, moving, and resizing a Licasa floating window at original speed](assets/demos/floating-resize.gif)
+
+**Keep multiple windows open** — Open additional views and arrange four floating windows.
+
+![Opening additional Licasa floating windows and arranging four views at original speed](assets/demos/multiple-windows.gif)
+
 ## Screenshots
+
+<details>
+<summary>Fullscreen viewer, floating windows, and photo editor</summary>
 
 **Fullscreen viewer** — View your photos with minimal controls.
 
@@ -36,6 +55,8 @@ If you try it, [report a bug or suggest a feature](https://github.com/sanxchep/l
 **Photo editor** — Adjust light, color, and detail, then save or export.
 
 ![Licasa photo editor with light, color, and detail controls beside a mountain photo](assets/screenshots/photo-editor.png)
+
+</details>
 
 ## Install
 
@@ -122,7 +143,7 @@ sudo pacman -R licasa-appimage     # Arch package
 sudo snap remove licasa            # Snap
 ```
 
-For the AppImage installation, remove `~/.local/opt/licasa-appimage`, `~/.local/share/applications/licasa-appimage.desktop`, and `~/.local/share/icons/hicolor/512x512/apps/licasa-appimage.png`. Delete only the paths created by the AppImage installer.
+For the AppImage installation, remove `~/.local/opt/licasa-appimage`, `~/.local/share/applications/licasa-appimage.desktop`, and `~/.local/share/icons/hicolor/512x512/apps/licasa-appimage.png`. If you set `XDG_DATA_HOME`, the launcher and icon are under that directory instead of `~/.local/share`. Delete only the paths created by the AppImage installer.
 
 ## Build the Linux packages
 
