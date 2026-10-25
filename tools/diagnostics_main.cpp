@@ -1,4 +1,5 @@
 #include "diagnostics_common.h"
+#include "diagnostics_dialogs.h"
 
 #include "app/app_constants.h"
 #include "app/application_settings.h"
@@ -120,6 +121,11 @@ int main(int argc, char** argv)
     const qint64 started = validStart ? parentStart : LicasaDiagnostics::monotonicNs();
     Licasa::ImageResourcePolicy::initializeDecoderEnvironment();
     Licasa::configureSurfaceFormatForRequestedOpenGL();
+    for (int argument = 1; argument < argc; ++argument) {
+        if (QString::fromLocal8Bit(argv[argument]) == QStringLiteral("--dialog-interactions")) {
+            QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        }
+    }
     QGuiApplication application(argc, argv);
     Licasa::configureSurfaceFormatForPlatform(QGuiApplication::platformName());
     Licasa::initializeImagePlugins();
@@ -128,6 +134,12 @@ int main(int argc, char** argv)
     application.setQuitOnLastWindowClosed(false);
     QCommandLineParser parser;
     parser.addHelpOption();
+    parser.addOption(
+        {"dialog-interactions", "Exercise the production file-picker UI and save flow."});
+    parser.addOption({"dialog-sample", "Known image to select in the picker.", "path"});
+    parser.addOption({"dialog-output-dir", "Isolated output directory for dialog tests.", "path"});
+    parser.addOption(
+        {"dialog-expect-unavailable", "Verify recoverable missing file-picker dependencies."});
     parser.addOption({"formats", "Report runtime formats and decode the supplied samples."});
     parser.addOption(
         {"viewer", "Measure the production QML viewer (use an isolated XDG_CONFIG_HOME)."});
@@ -155,6 +167,9 @@ int main(int argc, char** argv)
     parser.addOption(
         {"motion-photo-controls",
          "Drive the production TemporalControls lifecycle against one real Motion Photo."});
+    parser.addOption(
+        {"motion-frame-output",
+         "Save and decode a real captured frame during the Motion Photo control check.", "path"});
     parser.addOption({"megapixels", "Set the test image policy.", "mp", "100"});
     parser.addOption({"cycles", "Number of viewer close/reopen cycles to verify.", "count", "1"});
     parser.addPositionalArgument("images", "Local sample paths.", "[images...]");
@@ -207,7 +222,8 @@ int main(int argc, char** argv)
             ? QUrl()
             : QUrl::fromLocalFile(
                   QFileInfo(parser.positionalArguments().first()).absoluteFilePath());
-    if (parser.isSet("motion-photo-controls") && imageUrl.isEmpty()) {
+    if ((parser.isSet("motion-photo-controls") && imageUrl.isEmpty()) ||
+        (parser.isSet("motion-frame-output") && !parser.isSet("motion-photo-controls"))) {
         parser.showHelp(2);
     }
     Licasa::BackgroundModeManager background;
@@ -241,7 +257,15 @@ int main(int argc, char** argv)
     engine.addImageProvider(QString::fromLatin1(Licasa::Constants::imageProviderName),
                             decodeProvider);
     std::unique_ptr<LicasaDiagnostics::DiagnosticCheck> check;
-    if (navigationSequence) {
+    if (parser.isSet("dialog-interactions")) {
+        const QString sample = QFileInfo(parser.value("dialog-sample")).absoluteFilePath();
+        const QString output = QFileInfo(parser.value("dialog-output-dir")).absoluteFilePath();
+        if (!QFileInfo::exists(sample) || !QDir().mkpath(output) || !imageUrl.isEmpty()) {
+            parser.showHelp(2);
+        }
+        check = std::make_unique<LicasaDiagnostics::DialogInteractionCheck>(
+            QUrl::fromLocalFile(sample), output, parser.isSet("dialog-expect-unavailable"));
+    } else if (navigationSequence) {
         check = LicasaDiagnostics::makeNavigationSequenceCheck(
             decodeProvider, sequencePresses, sequenceIntervalMs, sequenceWarmupMs, sequenceIdleMs,
             sequenceDirection == QStringLiteral("left")         ? -1
@@ -258,7 +282,8 @@ int main(int argc, char** argv)
         check = LicasaDiagnostics::makeRawBehaviorCheck(parser.isSet("raw-preview-only"),
                                                         parser.isSet("raw-edit-only"));
     } else if (parser.isSet("motion-photo-controls")) {
-        check = LicasaDiagnostics::makeMotionPhotoControlsCheck();
+        check =
+            LicasaDiagnostics::makeMotionPhotoControlsCheck(parser.value("motion-frame-output"));
     } else {
         check = LicasaDiagnostics::makeViewerMeasurement(started, imageUrl, cycles);
     }
@@ -266,7 +291,8 @@ int main(int argc, char** argv)
         return 2;
     }
     for (auto* window : QGuiApplication::topLevelWindows()) {
-        if (auto* quick = qobject_cast<QQuickWindow*>(window)) {
+        if (auto* quick = qobject_cast<QQuickWindow*>(window);
+            quick && quick->property("windowSession").isValid()) {
             const bool attached = check->attach(quick);
             if (!attached) {
                 return 2;

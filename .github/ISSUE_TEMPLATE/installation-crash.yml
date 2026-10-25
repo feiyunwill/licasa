@@ -1,0 +1,50 @@
+name: Installation problem or crash
+description: Report a package that cannot install, start, open a file, or complete an action.
+title: "[Install/crash]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the reproducible failure even if you cannot collect diagnostics.
+        Native Ubuntu packages are specific to Ubuntu 24.04; Debian requires its own native build or a qualified portable candidate.
+        Review logs before attaching them: photo paths and local usernames may be present. No photo upload is required.
+  - type: input
+    id: package
+    attributes:
+      label: Package filename and version
+      description: Include the exact .deb, AppImage, RPM, Arch, or Snap filename; for Store Snaps include the channel/revision if known.
+      placeholder: Licasa-0.8.0-x86_64.AppImage
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Distribution, release, and architecture
+      placeholder: Debian 13 Trixie, amd64
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop and session
+      description: Include the desktop/version and X11 or Wayland if known. Unknown is a useful answer too.
+      placeholder: MATE, X11
+  - type: textarea
+    id: action
+    attributes:
+      label: Exact action and observed result
+      description: Give steps from installation or startup, what happened, and what you expected. Mention whether opening a photo directly differs from using Open Image, Save As, or frame export.
+    validations:
+      required: true
+  - type: textarea
+    id: errors
+    attributes:
+      label: Error output or crash log (optional)
+      description: Paste the terminal output or relevant section of the private errors.log. Remove any personal paths you do not want to share.
+      render: text
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Installer support report (optional)
+      description: For AppImage installs, run the matching install-licasa-appimage.sh --diagnose ./Licasa-VERSION-x86_64.AppImage and attach its output. Reports from newer source installers may contain more checks. Missing diagnostics will not prevent triage.
+      render: text

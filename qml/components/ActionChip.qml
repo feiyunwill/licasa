@@ -5,6 +5,7 @@ Item {
 
     required property string text
     property bool checked: false
+    property bool checkable: false
     property color accent: "#7AFFFFFF"
     property int animationDuration: 140
 
@@ -19,6 +20,8 @@ Item {
     Accessible.name: text
     Accessible.focusable: enabled
     Accessible.focused: activeFocus
+    Accessible.checkable: checkable
+    Accessible.checked: checkable && checked
     Accessible.onPressAction: clicked()
 
     Keys.onPressed: function(event) {

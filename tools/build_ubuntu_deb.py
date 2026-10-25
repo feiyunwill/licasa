@@ -93,6 +93,12 @@ def main() -> None:
     print("+ ctest --test-dir " + str(build) + " --output-on-failure", flush=True)
     subprocess.run(["ctest", "--test-dir", str(build), "--output-on-failure"],
                    cwd=ROOT, env=test_environment, check=True)
+    run(python, "tools/verify_qt_runtime_memory.py", "--runtime-profile", "ubuntu-6.4.2",
+        "--plugin", str(ffmpeg), "--work-dir", str(build / "qt-memory"), "--jobs", jobs)
+    evidence = output / "qt-runtime-memory"
+    evidence.mkdir(parents=True, exist_ok=True)
+    for name in ("report.json", "test.log"):
+        shutil.copy2(build / "qt-memory" / name, evidence / name)
     run(python, "tools/package_deb.py", "--build-dir", str(build),
         "--output-dir", str(output))
 

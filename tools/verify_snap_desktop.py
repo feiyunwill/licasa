@@ -9,10 +9,77 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
+from types import SimpleNamespace
+
+from package_motion_checks import installed_check, make_fixture
 
 
 PHOTO_COLORS = ((238, 32, 32), (32, 220, 32), (32, 64, 238), (238, 210, 32))
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def confined_dialog_wrappers(output):
+    """Keep both application and production-QML diagnostics inside Snap confinement."""
+    app = output / "confined-licasa.sh"
+    diagnostic = output / "confined-diagnostics.sh"
+    app.write_text('#!/bin/sh\nexec snap run licasa "$@"\n')
+    diagnostic.write_text(
+        '#!/bin/sh\nexec snap run --shell licasa -c '
+        # --shell bypasses the app command-chain. Restore the normal graphics
+        # and desktop setup, including the private runtime Wayland socket link.
+        '\'exec "$SNAP/snap/command-chain/gpu-2404-wrapper" '
+        '"$SNAP/snap/command-chain/desktop-launch" '
+        '"$SNAP/usr/bin/licasa_diagnostics" "$@"\' _ "$@"\n')
+    for wrapper in (app, diagnostic):
+        wrapper.chmod(0o755)
+    return app, diagnostic
+
+
+def check_dialog_interactions(output, picture, environment, *, protocol, mode):
+    app, diagnostic = confined_dialog_wrappers(output)
+    destination = output / f"{protocol}-{mode}-dialogs.json"
+    command = [sys.executable, str(ROOT / "tools/verify_dialog_interactions.py"),
+               "--app", str(app), "--diagnostic", str(diagnostic), "--sample", str(picture),
+               "--output", str(destination), "--protocol", protocol, "--mode", mode,
+               "--dialog-backend", "fallback", "--work-directory", str(output),
+               "--preserve-desktop-runtime"]
+    with (output / f"{protocol}-{mode}-dialogs.log").open("w") as log:
+        result = subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT,
+                                timeout=240, check=False)
+    if result.returncode:
+        raise RuntimeError(f"Confined Snap dialog interactions failed for {protocol}/{mode}")
+    report = json.loads(destination.read_text())
+    if (report.get("status") != "passed" or report.get("protocol") != protocol
+            or report.get("mode") != mode or report.get("dialog_backend") != "fallback"):
+        raise RuntimeError("Snap dialog harness did not produce a matching passed report")
+    report["confinement"] = "normal_snap_launcher_and_snap_run_shell"
+    return report
+
+
+def check_motion_interactions(output, environment, runtime_root, *, protocol, mode):
+    """Exercise packaged playback through the confined production diagnostic launcher."""
+    _, diagnostic = confined_dialog_wrappers(output)
+    cases = []
+    for rotation in (0, 90):
+        artifacts = output / f"{protocol}-{mode}-motion-{rotation}"
+        artifacts.mkdir()
+        fixture = artifacts / "motion-photo.jpg"
+        metadata = make_fixture(fixture, rotation)
+        arguments = SimpleNamespace(output=artifacts / "report.json", diagnostic=diagnostic,
+            fixture=fixture, runtime_root=runtime_root, qt_version="6.4.2", protocol=protocol,
+            mode=mode, rotation_degrees=rotation)
+        report = installed_check(arguments, environment=environment)
+        if (report.get("status") != "passed" or report.get("protocol") != protocol
+                or report.get("mode") != mode or report.get("rotation_degrees") != rotation
+                or report.get("qt_version") != "6.4.2"):
+            raise RuntimeError("Confined Snap Motion evidence has a mismatched session identity")
+        report["fixture"] = metadata
+        report["artifacts_directory"] = str(artifacts)
+        report["confinement"] = "snap_run_shell"
+        cases.append(report)
+    return cases
 
 
 def pattern_present(image):
@@ -142,7 +209,11 @@ def qualify(args):
         "desktop": args.desktop, "snap_version": args.version, "snap_revision": listed[1].split()[2],
         "package_source_commit": source, "cpu_model": cpu_model.group(1) if cpu_model else "unknown",
         "display_environment": "nested_desktop_on_hosted_vm",
-        "physical_gpu_coverage": "not_tested", "cases": {},
+        "physical_gpu_coverage": "not_tested", "cases": {}, "dialog_interactions": [],
+        "motion_photo": {"status": "pending", "qt_version": "6.4.2",
+            "runtime_root": str(Path("/snap/licasa/current").resolve(strict=True) / "usr"), "cases": [],
+            "coverage_limits": ["Software FFmpeg decoding on nested virtual desktops; physical GPU decoding is separate.",
+                "Pinned modern Android Motion fixtures exercise bounded custom QIODevice input."]},
     }
     connections = subprocess.check_output(["snap", "connections", "licasa"], text=True)
     (output / "snap-connections.txt").write_text(connections)
@@ -252,9 +323,14 @@ def qualify(args):
                         print(f"{args.desktop} {case}: normal Snap launch presented the photo", flush=True)
                     finally:
                         close_snap(app, app_env)
+                    report["dialog_interactions"].append(check_dialog_interactions(
+                        output, picture, app_env, protocol=protocol, mode=mode))
+                    report["motion_photo"]["cases"].extend(check_motion_interactions(
+                        output, app_env, report["motion_photo"]["runtime_root"], protocol=protocol, mode=mode))
             finally:
                 for process in reversed(processes):
                     stop(process)
+        report["motion_photo"]["status"] = "passed"
         report["status"] = "passed_nested_desktop_checks"
     except Exception as error:
         report["status"] = "failed"

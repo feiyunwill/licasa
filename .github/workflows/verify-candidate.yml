@@ -1,0 +1,374 @@
+name: Verify candidate without publishing
+
+# Called only by the existing Build and verify manual entry point. No release,
+# tag, Store upload, approval environment, or publication credentials are used.
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Immutable source commit selected by the calling workflow
+        required: true
+        type: string
+      expected_sha:
+        description: Full source commit explicitly selected by the operator
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-candidate-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+      matrix: ${{ steps.source.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Require the exact requested source and support contract
+        id: source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          python3 tools/hosted_candidate.py --source-sha "$SOURCE_SHA" --expected-sha "$EXPECTED_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+  build_native:
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: ubuntu-24.04
+            recipe: packaging/build-deb.Dockerfile
+            artifact: verification-ubuntu-packages
+          - target: debian-13
+            recipe: packaging/build-debian.Dockerfile
+            artifact: verification-debian-packages
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v7
+        id: builder
+        with:
+          context: packaging
+          file: ${{ matrix.recipe }}
+          load: true
+          pull: true
+          push: false
+          tags: licasa-verification:${{ matrix.target }}
+          cache-from: type=gha,scope=package-ci-${{ matrix.target }}
+          cache-to: type=gha,scope=package-ci-${{ matrix.target }},mode=min,ignore-error=true
+      - name: Restore only exact native dependency outputs
+        id: dependencies
+        uses: actions/cache@v5
+        with:
+          path: build/ci-package-dependencies/${{ matrix.target }}
+          key: package-ci-deps-v1-${{ matrix.target }}-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'packaging/qt-runtime-modules.json', 'packaging/verify-fresh-build.sh', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'tools/build_ubuntu_deb.py', 'tools/build_debian_deb.py', 'tools/build_ci_packages.py', 'tools/source_cache.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'cmake/strip_codec_rpath.cmake', 'cmake/LicasaRuntimeProfiles.cmake') }}
+      - name: Build and test the canonical native runtime and packages
+        env:
+          TARGET: ${{ matrix.target }}
+          REUSE: ${{ steps.dependencies.outputs.cache-hit }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          set -o pipefail
+          mkdir -p build/candidate-build-reports
+          reuse=()
+          if [ "$REUSE" = true ]; then reuse=(--reuse-dependencies); fi
+          python3 tools/build_ci_packages.py --target "$TARGET" --image "licasa-verification:$TARGET" \
+            --output "build/candidate-native/$TARGET" --dependencies "build/ci-package-dependencies/$TARGET" \
+            --jobs 3 "${reuse[@]}" 2>&1 | tee build/candidate-build-reports/build.log
+      - name: Retain immutable packages in the support manifest layout
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          directory="build/candidate-native/$TARGET"
+          packages=build/candidate-packages
+          case "$TARGET" in
+            ubuntu-24.04)
+              mkdir -p "$packages/deb" "$packages/appimage"
+              cp "$directory/licasa_${VERSION}-1_amd64.deb" "$directory/licasa_${VERSION}-1_amd64.deb.sha256" "$packages/deb/"
+              cp "$directory/Licasa-${VERSION}-x86_64.AppImage" "$directory/Licasa-${VERSION}-x86_64.AppImage.sha256" "$packages/appimage/"
+              cp "$directory/install-licasa-appimage.sh" "$directory/install-licasa-appimage.sh.sha256" "$packages/appimage/"
+              (cd "$packages/deb" && sha256sum --check "licasa_${VERSION}-1_amd64.deb.sha256")
+              (cd "$packages/appimage" && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256" && sha256sum --check install-licasa-appimage.sh.sha256)
+              git rev-parse HEAD > "$packages/deb/source-commit.txt"
+              ;;
+            debian-13)
+              mkdir -p "$packages/debian13"
+              cp "$directory/licasa_${VERSION}-1+deb13_amd64.deb" "$directory/licasa_${VERSION}-1+deb13_amd64.deb.sha256" "$packages/debian13/"
+              (cd "$packages/debian13" && sha256sum --check "licasa_${VERSION}-1+deb13_amd64.deb.sha256")
+              git rev-parse HEAD > "$packages/debian13/source-commit.txt"
+              ;;
+          esac
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/candidate-packages/
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-build-${{ matrix.target }}
+          path: |
+            build/candidate-build-reports/
+            build/candidate-native/${{ matrix.target }}/*.json
+            build/candidate-native/${{ matrix.target }}/qt-runtime-memory/
+          retention-days: 90
+          if-no-files-found: error
+
+  build_portable:
+    needs: [source, build_native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-ubuntu-packages
+          path: build/candidate-packages
+      - name: Build both wrappers from the same immutable portable payload
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(cat build/candidate-packages/deb/source-commit.txt)" = "$SOURCE_SHA"
+          (cd build/candidate-packages/appimage && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256")
+          appimage="build/candidate-packages/appimage/Licasa-${VERSION}-x86_64.AppImage"
+          python3 tools/package_rpm.py "$appimage" --output-dir build/candidate-wrappers/rpm
+          python3 tools/package_arch.py "$appimage" --output-dir build/candidate-wrappers/arch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: verification-portable-packages
+          path: build/candidate-wrappers/
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 0
+
+  build_snap:
+    needs: [source, build_native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-ubuntu-packages
+          path: build/candidate-packages
+      - name: Prepare the exact same-run Ubuntu package for confined repackaging
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(cat build/candidate-packages/deb/source-commit.txt)" = "$SOURCE_SHA"
+          (cd build/candidate-packages/deb && sha256sum --check "licasa_${VERSION}-1_amd64.deb.sha256")
+          mkdir -p snap-input
+          cp "build/candidate-packages/deb/licasa_${VERSION}-1_amd64.deb" \
+            "build/candidate-packages/deb/licasa_${VERSION}-1_amd64.deb.sha256" \
+            build/candidate-packages/deb/source-commit.txt snap-input/
+      - name: Build Snap in the disposable hosted VM
+        id: snapcraft
+        uses: snapcore/action-build@v1
+      - name: Inspect, install and smoke-test the same confined package
+        env:
+          SNAP_FILE: ${{ steps.snapcraft.outputs.snap }}
+          VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          test -f "$SNAP_FILE"
+          mkdir -p build/candidate-snap
+          cp "$SNAP_FILE" "build/candidate-snap/licasa_${VERSION}_amd64.snap"
+          (cd build/candidate-snap && sha256sum "licasa_${VERSION}_amd64.snap" > "licasa_${VERSION}_amd64.snap.sha256")
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools
+          test "$(unsquashfs -cat "$SNAP_FILE" usr/share/licasa/source-commit)" = "$SOURCE_SHA"
+          unsquashfs -cat "$SNAP_FILE" usr/share/licasa/qt-runtime-inventory.json > build/candidate-snap/qt-runtime-inventory.json
+          sudo snap set system experimental.user-daemons=false
+          sudo snap install --dangerous "$SNAP_FILE"
+          python3 tools/verify_snap_install.py --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --output build/candidate-snap/install-smoke.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-snap
+          path: build/candidate-snap/
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 0
+
+  packages:
+    needs: [source, build_native, build_portable]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        target: ${{ fromJSON(needs.source.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-ubuntu-packages
+          path: build/candidate-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-debian-packages
+          path: build/candidate-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-portable-packages
+          path: build/candidate-packages
+      - name: Run the manifest's package and interaction checks
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          mkdir -p build/candidate-reports
+          python3 tools/qualification_evidence.py run-target --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" \
+            --packages build/candidate-packages --evidence build/candidate-reports --target "$TARGET"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-outcome-${{ matrix.target }}
+          path: build/candidate-reports/
+          retention-days: 90
+          if-no-files-found: error
+
+  snap_desktops:
+    needs: [source, build_snap]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        desktop: [gnome, kde]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-snap
+          path: build/candidate-packages/snap
+      - name: Install the exact candidate and disposable desktop
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          DESKTOP: ${{ matrix.desktop }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pil xvfb dbus-x11 \
+            libglib2.0-bin x11-utils xdotool imagemagick mesa-utils libgl1-mesa-dri fonts-dejavu-core
+          case "$DESKTOP" in
+            gnome) sudo apt-get install -y --no-install-recommends gnome-shell ;;
+            kde) sudo apt-get install -y --no-install-recommends kwin-x11 kwin-wayland plasma-workspace plasma-workspace-wayland ;;
+          esac
+          (cd build/candidate-packages/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
+          sudo snap set system experimental.user-daemons=false
+          sudo snap install --dangerous "build/candidate-packages/snap/licasa_${VERSION}_amd64.snap"
+          python3 tools/verify_snap_install.py --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --output build/candidate-install.json
+      - name: Qualify GNOME or Plasma with retained evidence
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          TARGET: ubuntu24-snap-${{ matrix.desktop }}
+        run: |
+          /usr/bin/python3 tools/qualification_evidence.py run-target --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" \
+            --packages build/candidate-packages --evidence build/candidate-reports --target "$TARGET"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-outcome-snap-${{ matrix.desktop }}
+          path: build/candidate-reports/
+          retention-days: 90
+          if-no-files-found: error
+
+  attest:
+    needs: [source, packages, snap_desktops]
+    if: ${{ always() && needs.source.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-ubuntu-packages
+          path: build/candidate-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-debian-packages
+          path: build/candidate-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-snap
+          path: build/candidate-packages/snap
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-portable-packages
+          path: build/candidate-packages
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: verification-outcome-*
+          path: build/candidate-evidence
+          merge-multiple: true
+      - name: Bind all outcomes to the exact candidate
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 tools/qualification_evidence.py assemble --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" --packages build/candidate-packages --evidence build/candidate-evidence
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: licasa-verification-evidence
+          path: build/candidate-evidence/
+          retention-days: 90
+          if-no-files-found: error

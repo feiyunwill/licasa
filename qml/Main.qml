@@ -1680,9 +1680,74 @@ Window {
         zoomByFactor(factor, imageViewport.width * 0.5, imageViewport.height * 0.5)
     }
 
+    readonly property bool fileDialogVisible: Boolean(
+        (openDialogLoader.dialog && openDialogLoader.dialog.visible)
+        || (saveDialogLoader.dialog && saveDialogLoader.dialog.visible)
+        || (frameSaveDialogLoader.dialog && frameSaveDialogLoader.dialog.visible)
+        || (temporalExportCoordinatorLoader.item && temporalExportCoordinatorLoader.item.dialogVisible))
+
+    property var dialogFocusTarget: null
+
+    function rememberDialogFocus() {
+        dialogFocusTarget = activeFocusItem
+    }
+
+    function restoreDialogFocus() {
+        const target = dialogFocusTarget
+        dialogFocusTarget = null
+        Qt.callLater(function() {
+            if (target && target.visible && target.enabled)
+                target.forceActiveFocus(Qt.OtherFocusReason)
+            else
+                root.contentItem.forceActiveFocus(Qt.OtherFocusReason)
+        })
+    }
+
+    function reportDialogFailure(message) {
+        notificationCenter.finish("dialog", "error", "File picker unavailable", message)
+        restoreDialogFocus()
+    }
+
+    function connectFileDialog(dialog, chosen) {
+        dialog.fileChosen.connect(chosen)
+        dialog.openFailed.connect(root.reportDialogFailure)
+        dialog.accepted.connect(root.restoreDialogFocus)
+        dialog.rejected.connect(root.restoreDialogFocus)
+        dialog.openSafely()
+    }
+
+    function resetFailedDialog(loader: Loader) {
+        if (loader.status !== Loader.Error)
+            return
+        reportDialogFailure("The file picker could not be loaded. Check the installation and try again.")
+        failedDialogResetTimer.pendingLoaders = failedDialogResetTimer.pendingLoaders.concat([loader])
+        failedDialogResetTimer.restart()
+    }
+
+    Timer {
+        id: failedDialogResetTimer
+        property var pendingLoaders: []
+        interval: 0
+        repeat: false
+        onTriggered: {
+            const failed = pendingLoaders
+            pendingLoaders = []
+            for (let index = 0; index < failed.length; ++index) {
+                const loader = failed[index]
+                if (loader && loader.status === Loader.Error) {
+                    loader.active = false
+                    loader.source = ""
+                }
+            }
+        }
+    }
+
     function openFileDialog() {
+        if (fileDialogVisible)
+            return
+        rememberDialogFocus()
         if (openDialogLoader.dialog) {
-            openDialogLoader.dialog.open()
+            openDialogLoader.dialog.openSafely()
             return
         }
 
@@ -1720,17 +1785,18 @@ Window {
     }
 
     function openFrameSaveAsDialog() {
-        if (!hasAssignedImage()
+        if (fileDialogVisible || !hasAssignedImage()
                 || imageSaveService.busy
                 || !motionPhotoFrameSaveCoordinator
                 || !motionPhotoFrameSaveCoordinator.canSaveFrame) {
             return
         }
 
+        rememberDialogFocus()
         const suggestion = suggestedFrameSaveAsUrl()
         if (frameSaveDialogLoader.dialog) {
             frameSaveDialogLoader.dialog.suggestedFile = suggestion
-            frameSaveDialogLoader.dialog.open()
+            frameSaveDialogLoader.dialog.openSafely()
             return
         }
 
@@ -1779,13 +1845,14 @@ Window {
     }
 
     function openSaveAsDialog() {
-        if (!hasAssignedImage() || imageSaveService.busy)
+        if (fileDialogVisible || !hasAssignedImage() || imageSaveService.busy)
             return
 
+        rememberDialogFocus()
         const suggestion = suggestedSaveAsUrl()
         if (saveDialogLoader.dialog) {
             saveDialogLoader.dialog.suggestedFile = suggestion
-            saveDialogLoader.dialog.open()
+            saveDialogLoader.dialog.openSafely()
             return
         }
 
@@ -2304,11 +2371,11 @@ Window {
         }
     }
 
-    Shortcut { sequence: "Ctrl+O"; onActivated: root.openFileDialog() }
-    Shortcut { sequence: "Ctrl+S"; onActivated: root.saveCurrentImage() }
-    Shortcut { sequence: "Ctrl+Shift+S"; onActivated: root.openSaveAsDialog() }
+    Shortcut { enabled: !root.fileDialogVisible; sequence: "Ctrl+O"; onActivated: root.openFileDialog() }
+    Shortcut { enabled: !root.fileDialogVisible; sequence: "Ctrl+S"; onActivated: root.saveCurrentImage() }
+    Shortcut { enabled: !root.fileDialogVisible; sequence: "Ctrl+Shift+S"; onActivated: root.openSaveAsDialog() }
 
-    Shortcut {
+    Shortcut { enabled: !root.fileDialogVisible;
         sequence: "Esc"
         onActivated: {
             if (notificationCenter.historyOpen) {
@@ -2339,9 +2406,9 @@ Window {
         }
     }
 
-    Shortcut { sequence: "F"; enabled: !fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen; onActivated: root.fitToWindow() }
-    Shortcut { sequence: "1"; enabled: !fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen; onActivated: root.actualSize() }
-    Shortcut {
+    Shortcut { sequence: "F"; enabled: !root.fileDialogVisible && (!fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen); onActivated: root.fitToWindow() }
+    Shortcut { sequence: "1"; enabled: !root.fileDialogVisible && (!fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen); onActivated: root.actualSize() }
+    Shortcut { enabled: !root.fileDialogVisible;
         sequence: "C"
         onActivated: {
             if (root.fullScreenMode && root.editPanelOpen && !root.editorCropMode)
@@ -2350,35 +2417,35 @@ Window {
     }
     Shortcut {
         sequence: "Return"
-        enabled: root.editorCropMode
+        enabled: !root.fileDialogVisible && (root.editorCropMode)
         onActivated: {
             if (root.editorCropMode)
                 root.applyDraftCrop()
         }
     }
-    Shortcut { sequence: "Ctrl+Shift+Q"; onActivated: root.quitApp() }
-    Shortcut {
+    Shortcut { enabled: !root.fileDialogVisible; sequence: "Ctrl+Shift+Q"; onActivated: root.quitApp() }
+    Shortcut { enabled: !root.fileDialogVisible;
         sequence: "Ctrl+Z"
         onActivated: {
             if (root.fullScreenMode && root.editPanelOpen)
                 root.undoEditorChange()
         }
     }
-    Shortcut {
+    Shortcut { enabled: !root.fileDialogVisible;
         sequence: "Ctrl+Shift+Z"
         onActivated: {
             if (root.fullScreenMode && root.editPanelOpen)
                 root.redoEditorChange()
         }
     }
-    Shortcut { sequence: "F11"; onActivated: root.toggleFullScreen() }
-    Shortcut { sequence: "+"; enabled: !fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen; onActivated: root.zoomFromKeyboard(1.15) }
-    Shortcut { sequence: "="; enabled: !fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen; onActivated: root.zoomFromKeyboard(1.15) }
-    Shortcut { sequence: "-"; enabled: !fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen; onActivated: root.zoomFromKeyboard(1.0 / 1.15) }
+    Shortcut { enabled: !root.fileDialogVisible; sequence: "F11"; onActivated: root.toggleFullScreen() }
+    Shortcut { sequence: "+"; enabled: !root.fileDialogVisible && (!fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen); onActivated: root.zoomFromKeyboard(1.15) }
+    Shortcut { sequence: "="; enabled: !root.fileDialogVisible && (!fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen); onActivated: root.zoomFromKeyboard(1.15) }
+    Shortcut { sequence: "-"; enabled: !root.fileDialogVisible && (!fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen); onActivated: root.zoomFromKeyboard(1.0 / 1.15) }
 
     Shortcut {
         sequence: "E"
-        enabled: !root.editorCropMode
+        enabled: !root.fileDialogVisible && (!root.editorCropMode)
         onActivated: {
             if (root.fullScreenMode && root.hasAssignedImage())
                 root.setEditPanelOpen(!root.editPanelOpen)
@@ -2386,7 +2453,7 @@ Window {
     }
     Shortcut {
         sequence: "M"
-        enabled: !root.editorCropMode
+        enabled: !root.fileDialogVisible && (!root.editorCropMode)
         onActivated: {
             if (root.fullScreenMode) {
                 if (root.editPanelOpen)
@@ -2398,13 +2465,13 @@ Window {
     }
     Shortcut {
         sequence: "N"
-        enabled: root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen)
         onActivated: notificationCenter.historyOpen = !notificationCenter.historyOpen
     }
     Shortcut {
         sequence: "PageDown"
-        enabled: root.fullScreenMode && (root.editPanelOpen || fullscreenSideMenu.panelOpen
-            || notificationCenter.historyOpen)
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && (root.editPanelOpen || fullscreenSideMenu.panelOpen
+            || notificationCenter.historyOpen))
         onActivated: {
             if (notificationCenter.historyOpen)
                 notificationCenter.scrollHistoryByPage(1)
@@ -2416,8 +2483,8 @@ Window {
     }
     Shortcut {
         sequence: "PageUp"
-        enabled: root.fullScreenMode && (root.editPanelOpen || fullscreenSideMenu.panelOpen
-            || notificationCenter.historyOpen)
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && (root.editPanelOpen || fullscreenSideMenu.panelOpen
+            || notificationCenter.historyOpen))
         onActivated: {
             if (notificationCenter.historyOpen)
                 notificationCenter.scrollHistoryByPage(-1)
@@ -2429,87 +2496,87 @@ Window {
     }
     Shortcut {
         sequence: "Ctrl+1"
-        enabled: root.fullScreenMode && root.editPanelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && root.editPanelOpen)
         onActivated: editorSidePanel.activateTool("adjust")
     }
     Shortcut {
         sequence: "Ctrl+2"
-        enabled: root.fullScreenMode && root.editPanelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && root.editPanelOpen)
         onActivated: editorSidePanel.activateTool("crop")
     }
     Shortcut {
         sequence: "Ctrl+3"
-        enabled: root.fullScreenMode && root.editPanelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && root.editPanelOpen)
         onActivated: editorSidePanel.activateTool("looks")
     }
     Shortcut {
         sequence: "Ctrl+4"
-        enabled: root.fullScreenMode && root.editPanelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && root.editPanelOpen)
         onActivated: editorSidePanel.activateTool("export")
     }
 
     Shortcut {
         sequence: "Left"
-        enabled: root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
             && !notificationCenter.historyOpen
-            && !(root.temporalControlsItem && root.temporalControlsItem.keyboardFocusWithin)
+            && !(root.temporalControlsItem && root.temporalControlsItem.keyboardFocusWithin))
         onActivated: root.browseImage(-1)
     }
     Shortcut {
         sequence: "Right"
-        enabled: root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
             && !notificationCenter.historyOpen
-            && !(root.temporalControlsItem && root.temporalControlsItem.keyboardFocusWithin)
+            && !(root.temporalControlsItem && root.temporalControlsItem.keyboardFocusWithin))
         onActivated: root.browseImage(1)
     }
     Shortcut {
         sequence: "Up"
-        enabled: root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
             && !notificationCenter.historyOpen
-            && !(root.temporalControlsItem && root.temporalControlsItem.keyboardFocusWithin)
+            && !(root.temporalControlsItem && root.temporalControlsItem.keyboardFocusWithin))
         onActivated: root.zoomFromKeyboard(1.15)
     }
     Shortcut {
         sequence: "Down"
-        enabled: root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !root.editPanelOpen && !fullscreenSideMenu.panelOpen
             && !notificationCenter.historyOpen
-            && !(root.temporalControlsItem && root.temporalControlsItem.keyboardFocusWithin)
+            && !(root.temporalControlsItem && root.temporalControlsItem.keyboardFocusWithin))
         onActivated: root.zoomFromKeyboard(1.0 / 1.15)
     }
     Shortcut {
         sequence: "Ctrl+Left"
-        enabled: root.fullScreenMode && !fullscreenSideMenu.panelOpen
-            && !notificationCenter.historyOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !fullscreenSideMenu.panelOpen
+            && !notificationCenter.historyOpen)
         onActivated: root.moveImage(-48, 0)
     }
     Shortcut {
         sequence: "Ctrl+Right"
-        enabled: root.fullScreenMode && !fullscreenSideMenu.panelOpen
-            && !notificationCenter.historyOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !fullscreenSideMenu.panelOpen
+            && !notificationCenter.historyOpen)
         onActivated: root.moveImage(48, 0)
     }
     Shortcut {
         sequence: "Ctrl+Up"
-        enabled: root.fullScreenMode && !fullscreenSideMenu.panelOpen
-            && !notificationCenter.historyOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !fullscreenSideMenu.panelOpen
+            && !notificationCenter.historyOpen)
         onActivated: root.moveImage(0, -48)
     }
     Shortcut {
         sequence: "Ctrl+Down"
-        enabled: root.fullScreenMode && !fullscreenSideMenu.panelOpen
-            && !notificationCenter.historyOpen
+        enabled: !root.fileDialogVisible && (root.fullScreenMode && !fullscreenSideMenu.panelOpen
+            && !notificationCenter.historyOpen)
         onActivated: root.moveImage(0, 48)
     }
-    Shortcut { sequence: "Alt+Left"; enabled: root.editorCropMode; onActivated: cropOverlay.keyboardAdjust(-1, 0, false) }
-    Shortcut { sequence: "Alt+Right"; enabled: root.editorCropMode; onActivated: cropOverlay.keyboardAdjust(1, 0, false) }
-    Shortcut { sequence: "Alt+Up"; enabled: root.editorCropMode; onActivated: cropOverlay.keyboardAdjust(0, -1, false) }
-    Shortcut { sequence: "Alt+Down"; enabled: root.editorCropMode; onActivated: cropOverlay.keyboardAdjust(0, 1, false) }
-    Shortcut { sequence: "Alt+Shift+Left"; enabled: root.editorCropMode; onActivated: cropOverlay.keyboardAdjust(-1, 0, true) }
-    Shortcut { sequence: "Alt+Shift+Right"; enabled: root.editorCropMode; onActivated: cropOverlay.keyboardAdjust(1, 0, true) }
-    Shortcut { sequence: "Alt+Shift+Up"; enabled: root.editorCropMode; onActivated: cropOverlay.keyboardAdjust(0, -1, true) }
-    Shortcut { sequence: "Alt+Shift+Down"; enabled: root.editorCropMode; onActivated: cropOverlay.keyboardAdjust(0, 1, true) }
+    Shortcut { sequence: "Alt+Left"; enabled: !root.fileDialogVisible && (root.editorCropMode); onActivated: cropOverlay.keyboardAdjust(-1, 0, false) }
+    Shortcut { sequence: "Alt+Right"; enabled: !root.fileDialogVisible && (root.editorCropMode); onActivated: cropOverlay.keyboardAdjust(1, 0, false) }
+    Shortcut { sequence: "Alt+Up"; enabled: !root.fileDialogVisible && (root.editorCropMode); onActivated: cropOverlay.keyboardAdjust(0, -1, false) }
+    Shortcut { sequence: "Alt+Down"; enabled: !root.fileDialogVisible && (root.editorCropMode); onActivated: cropOverlay.keyboardAdjust(0, 1, false) }
+    Shortcut { sequence: "Alt+Shift+Left"; enabled: !root.fileDialogVisible && (root.editorCropMode); onActivated: cropOverlay.keyboardAdjust(-1, 0, true) }
+    Shortcut { sequence: "Alt+Shift+Right"; enabled: !root.fileDialogVisible && (root.editorCropMode); onActivated: cropOverlay.keyboardAdjust(1, 0, true) }
+    Shortcut { sequence: "Alt+Shift+Up"; enabled: !root.fileDialogVisible && (root.editorCropMode); onActivated: cropOverlay.keyboardAdjust(0, -1, true) }
+    Shortcut { sequence: "Alt+Shift+Down"; enabled: !root.fileDialogVisible && (root.editorCropMode); onActivated: cropOverlay.keyboardAdjust(0, 1, true) }
 
-    Shortcut {
+    Shortcut { enabled: !root.fileDialogVisible;
         sequence: "Ctrl+R"
         onActivated: {
             if (root.fullScreenMode && root.hasAssignedImage())
@@ -2517,7 +2584,7 @@ Window {
         }
     }
 
-    Shortcut {
+    Shortcut { enabled: !root.fileDialogVisible;
         sequence: "Y"
         onActivated: {
             if (root.fullScreenMode && root.hasAssignedImage() && !root.editorCropMode) {
@@ -2966,6 +3033,7 @@ Window {
         }
 
         function requestExport(kind) {
+            root.rememberDialogFocus()
             if (dispatchExport(kind))
                 return
 
@@ -2982,11 +3050,27 @@ Window {
             active = true
         }
 
+        onStatusChanged: root.resetFailedDialog(temporalExportCoordinatorLoader)
+
         onLoaded: {
+            item.dialogFailed.connect(root.reportDialogFailure)
+            item.dialogClosed.connect(root.restoreDialogFocus)
             const kind = pendingExportKind
             pendingExportKind = ""
             dispatchExport(kind)
         }
+    }
+
+    // Qt 6.4's fallback ignores the window modality requested by FileDialog.
+    // The picker lives in Qt's overlay above this shield; background actions
+    // must not close a photo or change edits while its destination is pending.
+    MouseArea {
+        anchors.fill: parent
+        z: 100000
+        visible: root.fileDialogVisible
+        acceptedButtons: Qt.AllButtons
+        hoverEnabled: true
+        onWheel: function(event) { event.accepted = true }
     }
 
     OverlayControls {
@@ -3282,6 +3366,8 @@ Window {
 
     Loader {
         id: openDialogLoader
+        objectName: "openDialogLoader"
+        onStatusChanged: root.resetFailedDialog(openDialogLoader)
 
         readonly property var dialog: item
 
@@ -3290,14 +3376,15 @@ Window {
 
         onLoaded: {
             if (dialog) {
-                dialog.fileChosen.connect(root.loadImageUrl)
-                dialog.open()
+                root.connectFileDialog(dialog, root.loadImageUrl)
             }
         }
     }
 
     Loader {
         id: saveDialogLoader
+        objectName: "saveDialogLoader"
+        onStatusChanged: root.resetFailedDialog(saveDialogLoader)
 
         readonly property var dialog: item
 
@@ -3306,14 +3393,15 @@ Window {
 
         onLoaded: {
             if (dialog) {
-                dialog.fileChosen.connect(root.saveEditedImage)
-                dialog.open()
+                root.connectFileDialog(dialog, root.saveEditedImage)
             }
         }
     }
 
     Loader {
         id: frameSaveDialogLoader
+        objectName: "frameSaveDialogLoader"
+        onStatusChanged: root.resetFailedDialog(frameSaveDialogLoader)
 
         readonly property var dialog: item
 
@@ -3322,8 +3410,7 @@ Window {
 
         onLoaded: {
             if (dialog) {
-                dialog.fileChosen.connect(root.saveCurrentMotionFrame)
-                dialog.open()
+                root.connectFileDialog(dialog, root.saveCurrentMotionFrame)
             }
         }
     }

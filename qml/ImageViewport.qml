@@ -1055,7 +1055,10 @@ Item {
                 Accessible.name: "Open image"
                 Accessible.focusable: visible
                 Accessible.focused: activeFocus
-                Accessible.onPressAction: root.openDialogRequested()
+                Accessible.onPressAction: {
+                    openImageButton.forceActiveFocus(Qt.OtherFocusReason)
+                    root.openDialogRequested()
+                }
 
                 Keys.onPressed: function(event) {
                     if (event.key !== Qt.Key_Space && event.key !== Qt.Key_Return

@@ -17,10 +17,12 @@ Item {
     Accessible.role: Accessible.CheckBox
     Accessible.name: title
     Accessible.description: subtitle
+    Accessible.checkable: true
     Accessible.checked: checked
     Accessible.focusable: enabled && visible
     Accessible.focused: activeFocus
     Accessible.onPressAction: root.toggled(!root.checked)
+    Accessible.onToggleAction: root.toggled(!root.checked)
 
     Keys.onPressed: function(event) {
         if (event.key !== Qt.Key_Space && event.key !== Qt.Key_Return

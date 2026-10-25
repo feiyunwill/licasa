@@ -76,6 +76,9 @@ parts:
       - libpng-dev
       - libwebp-dev
       - libxext-dev
+      - libegl-dev
+      - libdrm-dev
+      - libva-dev
       - qt6-base-private-dev
       - qt6-declarative-private-dev
       - qt6-shadertools-dev
@@ -92,11 +95,13 @@ parts:
       - qml6-module-qtquick-window
       - qml6-module-qtqml-workerscript
       - qml6-module-qtqml-models
+      - qml6-module-qtqml
       - qml6-module-qttest
       - qml6-module-qtquick-controls
       - qml6-module-qtquick-templates
       - qml6-module-qtquick-dialogs
       - qml6-module-qtquick-layouts
+      - qml6-module-qt-labs-folderlistmodel
     stage-packages:
       - libavcodec60
       - libavformat60
@@ -133,6 +138,7 @@ parts:
       - qml6-module-qtquick-layouts
       - qml6-module-qtquick-templates
       - qml6-module-qtquick-window
+      - qml6-module-qt-labs-folderlistmodel
     override-build: |
       set -eu
       cd "$CRAFT_PART_BUILD"
@@ -162,3 +168,13 @@ parts:
       readelf -d "$CRAFT_PART_INSTALL/usr/bin/licasa" | grep -Fq 'libXext.so.6'
       install -d "$CRAFT_PART_INSTALL/usr/share/licasa"
       printf '%s\n' "$source_commit" > "$CRAFT_PART_INSTALL/usr/share/licasa/source-commit"
+    override-prime: |
+      set -eu
+      craftctl default
+      # Check the final merged payload, including stage-packages, rather than
+      # relying on the GNOME content snap to supply this exact Qt profile.
+      python3 "$CRAFT_PROJECT_DIR/tools/qt_runtime.py" \
+        --qml-root "$CRAFT_PRIME/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/qt6/qml" \
+        --library-root "$CRAFT_PRIME/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR" \
+        --qt-version 6.4.2 \
+        --output "$CRAFT_PRIME/usr/share/licasa/qt-runtime-inventory.json"

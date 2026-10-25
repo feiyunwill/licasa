@@ -171,6 +171,7 @@ Item {
         anchors.bottomMargin: root.cornerControlMargin
         iconName: "settings"
         accessibleName: root.panelOpen ? "Close settings" : "Open settings"
+        checkable: true
         checked: root.panelOpen
         animationDuration: root.buttonMotionDuration
         onClicked: root.panelOpen = !root.panelOpen
@@ -412,6 +413,7 @@ Item {
                         text: root.advancedOpen
                             ? "Advanced settings  ▲"
                             : "Advanced settings  ▼"
+                        checkable: true
                         checked: root.advancedOpen
                         accent: "#34FFFFFF"
                         animationDuration: root.buttonMotionDuration

@@ -1,0 +1,82 @@
+--- a/src/plugins/multimedia/ffmpeg/playbackengine/qffmpegmediadataholder_p.h
++++ b/src/plugins/multimedia/ffmpeg/playbackengine/qffmpegmediadataholder_p.h
+@@ -34,7 +34,31 @@
+     virtual bool isCancelled() const = 0;
+ };
+ 
+-using AVFormatContextUPtr = std::unique_ptr<AVFormatContext, AVDeleter<decltype(&avformat_close_input), &avformat_close_input>>;
++// FFmpeg does not own an AVIOContext supplied by a QIODevice caller.
++struct CustomIODeleter
++{
++    void operator()(AVIOContext *io) const
++    {
++        if (!io)
++            return;
++        // avformat_open_input may replace the allocation supplied at creation.
++        av_freep(&io->buffer);
++        avio_context_free(&io);
++    }
++};
++using CustomIOUPtr = std::unique_ptr<AVIOContext, CustomIODeleter>;
++
++struct InputContextDeleter
++{
++    void operator()(AVFormatContext *context) const
++    {
++        if (!context)
++            return;
++        CustomIOUPtr io{ (context->flags & AVFMT_FLAG_CUSTOM_IO) ? context->pb : nullptr };
++        avformat_close_input(&context);
++    }
++};
++using AVFormatContextUPtr = std::unique_ptr<AVFormatContext, InputContextDeleter>;
+ 
+ class MediaDataHolder
+ {
+--- a/src/plugins/multimedia/ffmpeg/playbackengine/qffmpegmediadataholder.cpp
++++ b/src/plugins/multimedia/ffmpeg/playbackengine/qffmpegmediadataholder.cpp
+@@ -190,7 +190,14 @@
+     const QByteArray url = mediaUrl.toString(QUrl::PreferLocalFile).toUtf8();
+ 
+     AVFormatContextUPtr context{ avformat_alloc_context() };
+-
++    if (!context)
++        return MediaDataHolder::ContextError{
++            QMediaPlayer::ResourceError, QMediaPlayer::tr("Could not allocate media input.")
++        };
++
++    // Keep independent ownership until avformat_open_input succeeds: on error
++    // FFmpeg can free and clear the format context without freeing custom IO.
++    CustomIOUPtr customIO;
+     if (stream) {
+         if (!stream->isOpen()) {
+             if (!stream->open(QIODevice::ReadOnly))
+@@ -203,8 +210,17 @@
+ 
+         constexpr int bufferSize = 32768;
+         unsigned char *buffer = (unsigned char *)av_malloc(bufferSize);
+-        context->pb = avio_alloc_context(buffer, bufferSize, false, stream, &readQIODevice, nullptr,
+-                                         &seekQIODevice);
++        if (buffer)
++            customIO.reset(avio_alloc_context(buffer, bufferSize, false, stream, &readQIODevice,
++                                              nullptr, &seekQIODevice));
++        if (!customIO) {
++            av_free(buffer);
++            return MediaDataHolder::ContextError{
++                QMediaPlayer::ResourceError, QMediaPlayer::tr("Could not allocate media input.")
++            };
++        }
++        context->pb = customIO.get();
++        context->flags |= AVFMT_FLAG_CUSTOM_IO;
+     }
+ 
+     AVDictionaryHolder dict;
+@@ -228,6 +244,8 @@
+         AVFormatContext *contextRaw = context.release();
+         ret = avformat_open_input(&contextRaw, url.constData(), nullptr, dict);
+         context.reset(contextRaw);
++        if (ret >= 0)
++            customIO.release(); // InputContextDeleter now owns successful custom input.
+     }
+ 
+     if (ret < 0) {

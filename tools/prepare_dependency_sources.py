@@ -7,12 +7,14 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from runtime_profiles import PROFILES, add_runtime_profile_argument
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_runtime_profile_argument(parser)
     parser.add_argument("--source-cache", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--libraw-rawspeed3", action="store_true")
@@ -25,15 +27,19 @@ def main():
     codecs = ["--libraw-rawspeed3"] if args.libraw_rawspeed3 else []
     commands = [
         ("build_codecs.py", ["--work-dir", str(work / "codecs"), *codecs]),
-        ("build_qt_ffmpeg.py", ["--work-dir", str(work / "qt")]),
-        ("build_qt_backport.py", ["--work-dir", str(work / "qt")]),
+        ("build_qt_ffmpeg.py", ["--work-dir", str(work / "qt"),
+                               "--runtime-profile", args.runtime_profile]),
     ]
-    locks = ["packaging/codecs.lock.json", "packaging/qt-ffmpeg.lock.json",
-             "packaging/qt-backport.lock.json"]
+    profile = PROFILES[args.runtime_profile]
+    locks = ["packaging/codecs.lock.json", profile["ffmpeg_lock"]]
+    if profile["quick_lock"]:
+        commands.append(("build_qt_backport.py", ["--work-dir", str(work / "qt"),
+                                                 "--runtime-profile", args.runtime_profile]))
+        locks.append(profile["quick_lock"])
     for script, options in commands:
         subprocess.run([sys.executable, str(ROOT / "tools" / script), *common, *options], check=True)
     inventory = {
-        "runtime_profile": "ubuntu-6.4.2",
+        "runtime_profile": args.runtime_profile,
         "rawspeed3": args.libraw_rawspeed3,
         "locks": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in locks},
         "patches": {},

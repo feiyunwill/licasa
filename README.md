@@ -59,6 +59,30 @@ If you try it, [report a bug or suggest a feature](https://github.com/sanxchep/l
 
 ## Install
 
+The native Ubuntu `.deb` is built for **Ubuntu 24.04 only**. It cannot be installed on Debian by changing dependency names: the JPEG, FFmpeg, and Qt binary interfaces differ. Do not force its dependencies or mix Ubuntu repositories into Debian.
+
+The support contract below describes qualification required for a new candidate from this source tree. It does not retroactively certify published 0.8.0 packages. The Debian 13 native target is in development until its complete candidate qualification passes; no Debian-native 0.8.0 download is available. The published 0.8.0 AppImage has a known fallback file-picker defect on Debian, tracked in [issue #3](https://github.com/sanxchep/licasa/issues/3).
+
+<!-- support-matrix:start -->
+| Package / target | Architecture / libc baseline | Qt runtime | Candidate qualification |
+| --- | --- | --- | --- |
+| ubuntu-deb / Ubuntu 24.04 | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| debian-deb / Debian 13 (Trixie) | x86-64 / glibc ≥ 2.41 | 6.8.2 | In development; not a published support claim |
+| debian-deb / Debian 13 / MATE X11 / native GTK file picker | x86-64 / glibc ≥ 2.41 | 6.8.2 | In development; not a published support claim |
+| appimage / Ubuntu 24.04 | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| appimage / Ubuntu 26.04 | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| appimage / Debian 13 (Trixie) | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| appimage / Debian 13 / MATE X11 / AT-SPI keyboard accessibility | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| appimage / Fedora 44 | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| appimage / Arch Linux (rolling; tested image recorded in evidence) | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| rpm / Fedora 44 | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| arch / Arch Linux (rolling; tested image recorded in evidence) | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| snap / Ubuntu 24.04 / GNOME X11 and Wayland | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+| snap / Ubuntu 24.04 / Plasma X11 and Wayland | x86-64 / glibc ≥ 2.39 | 6.4.2 | Required before stable |
+<!-- support-matrix:end -->
+
+The table is generated from [the support manifest](packaging/support-matrix.json). ARM, 32-bit, musl-based systems, older glibc releases, and unlisted native distribution targets are outside this contract. A supported target requires a passing report for the exact candidate; skipped, failed, and unsupported outcomes are recorded separately. Container checks cover the named userspace with virtual displays, while the Snap jobs exercise nested GNOME/Plasma sessions. The MATE target starts MATE and AT-SPI for keyboard, role, state, value, and focus checks. A separate Debian-native target confirms GTK chooser widgets and their matching Qt platform theme, then selects a photo, cancels and reopens dialogs, preserves edits, and decodes Save As output. Physical graphics, other native dialog providers and Wayland portals, native desktop login sessions, and spoken screen-reader announcement order require separate desktop evidence. Automated accessibility checks do not establish conformance.
+
 ### Ubuntu 24.04 (amd64)
 
 Download `licasa_0.8.0-1_amd64.deb` and its `.sha256` file. APT installs the required system libraries:
@@ -88,7 +112,7 @@ sudo pacman -U ./licasa-appimage-0.8.0-1-x86_64.pkg.tar.zst
 
 The release also includes a `PKGBUILD` for people who prefer to build the Arch package themselves. The `.pkg.tar.zst` file above is ready to install.
 
-### AppImage (recent x86-64 desktops)
+### AppImage (qualified x86-64 glibc desktops)
 
 Download `Licasa-0.8.0-x86_64.AppImage`, `install-licasa-appimage.sh`, and both `.sha256` files:
 
@@ -131,7 +155,7 @@ If Licasa has trouble, its private error log is at `$XDG_STATE_HOME/licasa/error
 
 ## Update
 
-For Debian, Fedora, Arch, or AppImage, download the newer files and repeat the matching installation steps above with the new filenames. Close Licasa before updating an AppImage installation; the installer replaces its per-user files and launcher.
+For Ubuntu `.deb`, Fedora, Arch, or AppImage, download the newer files and repeat the matching installation steps above with the new filenames. Match native packages to their distribution target. Close Licasa before updating an AppImage installation; the installer replaces its per-user files and launcher.
 
 Store-installed Snaps update automatically. To switch an existing Snap to the beta channel, run `sudo snap refresh licasa --beta`. A directly installed `.snap` file requires another manual download and `sudo snap install --dangerous ./<new-file>.snap` after checking its checksum.
 
@@ -172,6 +196,32 @@ The `.deb`, AppImage, and SHA-256 files appear in `build/deb-output/`. Docker is
 ```
 
 ## Verify desktop launches
+
+Pull requests that change runtime code, QML, build recipes, package tools, or their tests build actual Ubuntu and Debian packages in disposable hosted jobs. Those jobs exercise native packages, the portable package on Trixie, MATE/AT-SPI, and Debian's native GTK picker using the same source recipes as release candidates. Documentation-only changes keep the fast source and support-contract checks. PR evidence cannot authorize a stable release; every release candidate still runs the complete support matrix below.
+
+To verify a development branch before publication, dispatch **Build and verify** at that branch with `verify_candidate=true` and `expected_sha` set to its full commit hash. It builds every candidate package, runs the complete support matrix including confined Snap on GNOME and Plasma, and retains the hash-bound `licasa-verification-evidence` artifact for 90 days. This route has read-only repository permissions and no release or Store upload steps; its evidence cannot authorize stable promotion.
+
+Release maintainers first build all artifacts with the package workflow, then dispatch **Qualify exact release candidate** at that candidate's tag with its build run ID. It checks out the exact candidate source, downloads those same build artifacts, and runs the support manifest's package and dialog matrix. **Approve stable and mark GitHub release latest** requires both build and qualification run IDs, validates every package and evidence hash, and keeps the existing Snap revision checks and approval environment. A missing target, skipped interaction, mismatched source, changed artifact, or incomplete evidence blocks promotion. Evidence remains in Actions for 90 days and the successful bundle is attached to the stable GitHub release for durable retention. The older published-package qualification workflow remains useful for diagnosis, but cannot authorize promotion.
+
+The package gates exercise Open, cancel, reopen, visible photo selection, Save As, decoded output, and all lazy dialog imports on X11 and Wayland with both renderers. A deliberately removed FolderListModel module must reject assembly and produce a recoverable error without losing the image or edits; Snap's immutable runtime keeps its production negative tests instead. Eight Motion Photo cases cover both displays, renderers, and video rotations using pinned embedded videos, then verify playback controls, frame capture, orientation, private FFmpeg loading, and teardown. These checks run against installed packages, including confined Snap launchers.
+
+For the Debian-native candidate, build inside its own userspace:
+
+```sh
+docker build -f packaging/build-debian.Dockerfile -t licasa-debian13-builder packaging
+mkdir -p build/qualification/debian13
+docker run --rm -v "$PWD:/source:ro" -v "$PWD/build/qualification/debian13:/output" \
+  licasa-debian13-builder bash -ec '
+    set -o pipefail
+    mkdir -p /work/licasa
+    tar -C /source --exclude="./build*" --exclude="./cmake-build-*" \
+      --exclude="./.git" --exclude="./.idea" --exclude="./private-validation" \
+      --exclude="./CMakeUserPresets.json" -cf - . | tar -C /work/licasa -xf -
+    cd /work/licasa
+    python3 tools/build_debian_deb.py --jobs 3 --output-dir /output'
+```
+
+The Debian package is distinctly named `licasa_<version>-1+deb13_amd64.deb`. Its private codecs and multimedia plugin are rebuilt against Debian 13; the Ubuntu package and its portable derivatives keep their existing Qt profile. After the build, use `tools/verify_deb_container.py <package> --target debian-13` for clean APT installation, decoder, runtime-isolation, and dialog checks. Full candidate qualification remains required before claiming support.
 
 Maintainers can use `tools/verify_linux_vm_desktop.py` with a disposable QEMU/KVM guest running a normal GNOME or Plasma Wayland login through GDM or SDDM. Install the desktop, Python/Pillow, GTK's `gtk-launch`, desktop-file-utils, xdg-utils, and the appropriate GNOME/KDE file-handler tools in the guest. Install the candidate AppImage with the updated installer and install the native package separately. Keep Qt's platform and graphics backend overrides unset.
 

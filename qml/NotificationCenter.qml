@@ -233,6 +233,7 @@ Item {
         visible: root.appVisible
         iconName: "notifications"
         accessibleName: "Notifications"
+        checkable: true
         checked: root.historyOpen
         onClicked: root.historyOpen = !root.historyOpen
 
@@ -255,6 +256,9 @@ Item {
     Rectangle {
         id: toast
         objectName: "notificationToast"
+        Accessible.role: Accessible.AlertMessage
+        Accessible.name: root.toastTitle
+        Accessible.description: root.toastDetail
         width: Math.max(0, Math.min(360, root.width - 16))
         height: toastContent.implicitHeight + 24
         x: root.fullScreenMode

@@ -41,6 +41,7 @@ Column {
                     required property var modelData
                     objectName: "editorExportFormat_" + modelData.key
                     text: modelData.label
+                    checkable: true
                     checked: root.exportFormat === modelData.key
                     accent: "#48FFFFFF"
                     animationDuration: root.buttonMotionDuration

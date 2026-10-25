@@ -18,6 +18,8 @@ SAMPLES = {
     "heic": "modern/heif/with-alpha-512x512.heic",
     "dng": "modern/raw/small.dng",
     "apng": "animated/apng/standard-transparent-320x240.apng",
+    "svg": "formats/additional-probes/vector-check.svg",
+    "qoi": "modern/format-readers/qoi-check.qoi",
 }
 
 

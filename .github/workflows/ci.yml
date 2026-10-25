@@ -2,6 +2,16 @@ name: Build and verify
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      verify_candidate:
+        description: Build and qualify all package targets without publishing
+        required: false
+        type: boolean
+        default: false
+      expected_sha:
+        description: Full source commit required for complete candidate verification
+        required: false
+        type: string
   workflow_call:
     inputs:
       source_ref:
@@ -23,12 +33,27 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  package_contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Check package contracts and qualification regressions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pil python3-gi gir1.2-glib-2.0 patchelf gcc
+          python3 tools/check_support_manifest.py
+          /usr/bin/python3 -B -m unittest discover -s tests -p 'test_*.py' -v
+
   scope:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       build: ${{ steps.scope.outputs.build }}
+      packages: ${{ steps.scope.outputs.packages }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -43,9 +68,21 @@ jobs:
           import sys
           paths = Path(sys.argv[1]).read_bytes().split(b'\0')
           build = any(path and not (path.endswith(b'.md') or path == b'LICENSE') for path in paths)
+          packages = any(path and not path.endswith(b'.md') and (
+              path.startswith((b'src/', b'qml/', b'cmake/', b'packaging/', b'snap/', b'tools/', b'tests/',
+                               b'.github/workflows/', b'assets/icons/'))
+              or path in (b'CMakeLists.txt', b'CMakePresets.json', b'assets/licasa.png')) for path in paths)
           with open(sys.argv[2], 'a') as output:
               output.write(f"build={str(build).lower()}\n")
+              output.write(f"packages={str(packages).lower()}\n")
           PY
+
+  package_interactions:
+    needs: scope
+    if: github.event_name == 'pull_request' && needs.scope.outputs.packages == 'true'
+    uses: ./.github/workflows/package-interactions.yml
+    with:
+      source_ref: ${{ github.sha }}
 
   test:
     needs: scope
@@ -68,9 +105,9 @@ jobs:
             libx11-dev libxext-dev \
             qt6-base-dev qt6-declarative-dev qt6-svg-dev qt6-image-formats-plugins \
             qt6-base-private-dev qt6-declarative-private-dev qt6-shadertools-dev \
-            qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtqml-workerscript \
+            qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtqml qml6-module-qtqml-workerscript \
             qml6-module-qttest qml6-module-qtquick-controls qml6-module-qtquick-templates \
-            qml6-module-qtquick-dialogs qml6-module-qtquick-layouts
+            qml6-module-qtquick-dialogs qml6-module-qtquick-layouts qml6-module-qt-labs-folderlistmodel
       - name: Check first-party C++ formatting
         run: python3 tools/check_code_style.py
       - name: Fingerprint the installed dependency toolchain
@@ -86,7 +123,7 @@ jobs:
             build/codecs/prefix
             build/deps/qt-backport-runtime
           # No fallback keys: release/ASan/UBSan and ABI revisions stay separate.
-          key: native-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', '.github/workflows/ci.yml') }}
+          key: native-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'packaging/qt-runtime-modules.json', 'cmake/LicasaRuntimeProfiles.cmake', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', '.github/workflows/ci.yml') }}
       - name: Cache compiler outputs
         uses: actions/cache@v5
         with:
@@ -142,3 +179,11 @@ jobs:
             build/${{ matrix.preset }}/package-smoke.json
             build/${{ matrix.preset }}/raw-viewer-behavior.json
             build/${{ matrix.preset }}/viewer-lifecycle.json
+
+  candidate_verification:
+    needs: [package_contract, test]
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_candidate
+    uses: ./.github/workflows/verify-candidate.yml
+    with:
+      source_sha: ${{ github.sha }}
+      expected_sha: ${{ inputs.expected_sha }}

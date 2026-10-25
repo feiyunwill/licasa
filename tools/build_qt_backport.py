@@ -6,6 +6,7 @@ qt6-shadertools-dev in addition to the normal application build dependencies.
 --qt-prefix also accepts an unpacked development prefix; no system install is made.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import tarfile
 from source_cache import add_source_arguments, fetch_archive
+from runtime_profiles import PROFILES, add_runtime_profile_argument, configured_qt_version
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_source_arguments(parser)
+    add_runtime_profile_argument(parser)
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build/deps")
     parser.add_argument("--qt-prefix", type=Path)
     parser.add_argument(
@@ -40,7 +43,10 @@ def main():
     if args.jobs < 1:
         parser.error("jobs must be at least 1")
     work = args.work_dir.resolve()
-    spec_path = ROOT / "packaging/qt-backport.lock.json"
+    lock = PROFILES[args.runtime_profile]["quick_lock"]
+    if lock is None:
+        parser.error("This profile uses the audited same-version distro Qt Quick; no backport is required")
+    spec_path = ROOT / lock
     spec = json.loads(spec_path.read_text())
     downloads = args.source_cache.resolve() / "archives" if args.source_cache else work / "downloads"
     archive = fetch_archive(downloads, spec["url"], spec["sha256"], offline=args.offline,
@@ -75,6 +81,8 @@ def main():
         library_dirs = [qt_prefix / "lib", *sorted((qt_prefix / "lib").glob("*-linux-gnu"))]
         env["LD_LIBRARY_PATH"] = os.pathsep.join(map(str, library_dirs))
     subprocess.run(command, env=env, check=True)
+    if configured_qt_version((build / "CMakeCache.txt").read_text()) != spec["version"]:
+        raise RuntimeError(f"Private Qt Quick requires exact Qt {spec['version']}")
     subprocess.run(["cmake", "--build", str(build), "--target", "Quick",
                     "--parallel", str(args.jobs)], env=env, check=True)
     name = f"libQt6Quick.so.{spec['version']}"
@@ -102,6 +110,13 @@ def main():
     shutil.copytree(source / "LICENSES", licenses, dirs_exist_ok=True)
     shutil.copy2(spec_path, licenses / "sources.json")
     shutil.copy2(patch, licenses / patch.name)
+    (runtime / "build.json").write_text(json.dumps({
+        "runtime_profile": args.runtime_profile, "qt_version": spec["version"],
+        "library_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+        "source_sha256": spec["sha256"],
+        "patches": {spec["patch"]: hashlib.sha256(patch.read_bytes()).hexdigest()},
+        "build_target": "Quick", "configure": command,
+    }, indent=2) + "\n")
     print(f"Verified Qt Quick runtime: {output}")
 
 

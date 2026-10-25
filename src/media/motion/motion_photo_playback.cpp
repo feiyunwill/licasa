@@ -1,6 +1,7 @@
 #include "media/motion/motion_photo_playback.h"
 
 #include "imaging/image_decode_contract.h"
+#include "media/motion/video_frame_image.h"
 
 #include <QColorSpace>
 #include <QCoreApplication>
@@ -9,7 +10,6 @@
 #include <QMediaPlayer>
 #include <QThread>
 #include <QTimer>
-#include <QTransform>
 #include <QVideoFrame>
 #include <QVideoSink>
 #include <QtEndian>
@@ -300,23 +300,9 @@ std::optional<MotionPhotoFrameRaster> rasterFromVideoFrame(const QVideoFrame& fr
         return std::nullopt;
     }
 
-    // QVideoFrame::toImage() intentionally does not apply presentation
-    // transforms. Apply them before the frame crosses the private backend ABI so
-    // the public-side presentation surface receives exactly one owned RGBA view.
-    QImage image = frame.toImage();
-    if (image.isNull() || !ImageDecodeContract::allows(image.size(), admittedPixels)) {
-        return std::nullopt;
-    }
-
-    const int frameRotationDegrees = static_cast<int>(frame.rotationAngle());
-    const int rotationDegrees =
-        frameRotationDegrees != 0 ? frameRotationDegrees : fallbackRotationDegrees;
-    if (rotationDegrees != 0) {
-        image = image.transformed(QTransform().rotate(rotationDegrees), Qt::SmoothTransformation);
-    }
-    if (frame.mirrored()) {
-        image = image.mirrored(true, false);
-    }
+    // Normalize Qt's version-specific conversion semantics before crossing
+    // the private backend ABI. The surface receives one owned RGBA view.
+    QImage image = Detail::videoFramePresentationImage(frame, fallbackRotationDegrees);
     if (image.isNull() || !ImageDecodeContract::allows(image.size(), admittedPixels)) {
         return std::nullopt;
     }
@@ -385,6 +371,8 @@ struct MotionPhotoPlayback::Session {
     // resumes/seeks/stops instead of letting that stale EOS tear it down.
     bool pauseRequested = false;
     bool previewedEnd = false;
+    std::optional<qint64> pausedPreviewPositionMs;
+    std::optional<MotionPhotoFrameRaster> pausedPreviewFrame;
     bool lockHeld = false;
     std::shared_ptr<PreviewSeekState> previewSeek = std::make_shared<PreviewSeekState>();
     std::shared_ptr<FrameHandoff> frameHandoff = std::make_shared<FrameHandoff>();
@@ -417,6 +405,9 @@ bool MotionPhotoPlayback::seekable() const
 }
 qint64 MotionPhotoPlayback::position() const
 {
+    if (session_ && session_->pausedPreviewPositionMs) {
+        return *session_->pausedPreviewPositionMs;
+    }
     return session_ && session_->player ? session_->player->position() : 0;
 }
 
@@ -430,6 +421,9 @@ std::optional<MotionPhotoFrameRaster> MotionPhotoPlayback::captureCurrentFrame()
     Q_ASSERT(thread() == QThread::currentThread());
     if (!session_ || !session_->admitted || !session_->sink) {
         return std::nullopt;
+    }
+    if (session_->pausedPreviewFrame) {
+        return session_->pausedPreviewFrame;
     }
     return rasterFromVideoFrame(session_->sink->videoFrame(), session_->pixels,
                                 session_->presentationRotationDegrees);
@@ -721,6 +715,7 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                 if (previewSeek->completing) {
                     return;
                 }
+                previewRequest = previewSeek->request;
                 if (previewSeek->active) {
                     const bool reachesTarget =
                         timestamp >= previewSeek->targetUs ||
@@ -732,17 +727,27 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                     }
                     previewSeek->active = false;
                     previewSeek->completing = true;
-                    previewRequest = previewSeek->request;
                     completesPreview = true;
                 }
             }
 
             const std::optional<MotionPhotoFrameRaster> raster =
-                copyPresentationFrames
+                (copyPresentationFrames || completesPreview)
                     ? rasterFromVideoFrame(frame, admittedPixels, presentationRotationDegrees)
                     : std::nullopt;
-            const bool conversionFailed = copyPresentationFrames && !raster.has_value();
+            const bool conversionFailed =
+                (copyPresentationFrames || completesPreview) && !raster.has_value();
             const QSize presentationSize = raster ? raster->size : size;
+
+            {
+                std::lock_guard<std::mutex> lock(previewSeek->mutex);
+                // Conversion can overlap a new seek or the selection of its
+                // target. An older frame must not overwrite that handoff.
+                if (previewSeek->request != previewRequest ||
+                    (previewSeek->completing && !completesPreview)) {
+                    return;
+                }
+            }
 
             bool queueCallback = false;
             {
@@ -786,13 +791,22 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                     }
 
                     bool pauseAfterPreview = false;
-                    if (pending->completesPreview) {
+                    {
                         std::lock_guard<std::mutex> lock(previewSeek->mutex);
-                        if (previewSeek->request == pending->previewRequest &&
-                            previewSeek->completing) {
-                            previewSeek->completing = false;
-                            pauseAfterPreview = true;
+                        if (previewSeek->request != pending->previewRequest ||
+                            (previewSeek->completing && !pending->completesPreview)) {
+                            return;
                         }
+                        pauseAfterPreview = pending->completesPreview && previewSeek->completing;
+                    }
+                    if (pauseAfterPreview) {
+                        // Keep the selection latch closed until the next user
+                        // transport intent. Qt 6.4 can deliver later frames
+                        // while pause() waits for its renderer mutex, even
+                        // after its media clock has already been paused.
+                        // Share the accepted raster for explicit capture;
+                        // QVideoSink's raw frame can still advance underneath.
+                        session_->pausedPreviewFrame = pending->raster;
                     }
 
                     session_->frameSeen = true;
@@ -801,7 +815,15 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                         frameReadyCallback_(std::move(*pending->raster));
                     }
 
-                    if (pauseAfterPreview && session_ && session_->player) {
+                    if (pauseAfterPreview && generation == generation_ && session_ &&
+                        session_->player) {
+                        {
+                            std::lock_guard<std::mutex> lock(previewSeek->mutex);
+                            if (previewSeek->request != pending->previewRequest ||
+                                !previewSeek->completing) {
+                                return;
+                            }
+                        }
                         session_->pauseRequested = true;
                         session_->player->pause();
                         emit changed();
@@ -853,7 +875,11 @@ void MotionPhotoPlayback::pause()
             std::lock_guard<std::mutex> lock(session_->previewSeek->mutex);
             ++session_->previewSeek->request;
             session_->previewSeek->active = false;
-            session_->previewSeek->completing = false;
+            // Repeated Pause must preserve an already selected paused frame.
+            if (!session_->pausedPreviewFrame) {
+                session_->previewSeek->completing = false;
+                session_->pausedPreviewPositionMs.reset();
+            }
         }
         session_->pauseRequested = true;
         session_->player->pause();
@@ -870,6 +896,9 @@ void MotionPhotoPlayback::resume()
         }
 
         auto* player = session_->player.get();
+        const auto previewPosition = session_->pausedPreviewPositionMs;
+        session_->pausedPreviewPositionMs.reset();
+        session_->pausedPreviewFrame.reset();
         {
             std::lock_guard<std::mutex> lock(session_->previewSeek->mutex);
             ++session_->previewSeek->request;
@@ -878,10 +907,18 @@ void MotionPhotoPlayback::resume()
         }
         session_->pauseRequested = false;
         const qint64 mediaDuration = player->duration();
-        const bool replayFromEnd = session_->previewedEnd ||
-                                   player->mediaStatus() == QMediaPlayer::EndOfMedia ||
-                                   (mediaDuration > 0 && player->position() >= mediaDuration);
+        const bool replayFromEnd =
+            session_->previewedEnd ||
+            (!previewPosition && (player->mediaStatus() == QMediaPlayer::EndOfMedia ||
+                                  (mediaDuration > 0 && player->position() >= mediaDuration)));
         if (!replayFromEnd) {
+            // Restore the selected position if Qt advanced its raw clock
+            // while settling the paused preview. A stale EOF must not turn a
+            // midpoint resume into a replay from zero.
+            if (previewPosition && (player->position() != *previewPosition ||
+                                    player->mediaStatus() == QMediaPlayer::EndOfMedia)) {
+                player->setPosition(*previewPosition);
+            }
             player->play();
             return;
         }
@@ -916,7 +953,8 @@ void MotionPhotoPlayback::seek(qint64 milliseconds)
         }
 
         auto* player = session_->player.get();
-        const bool resumeAfterSeek = player->playbackState() == QMediaPlayer::PlayingState;
+        const bool resumeAfterSeek =
+            !session_->pauseRequested && player->playbackState() == QMediaPlayer::PlayingState;
         const qint64 target = std::min(pendingSeek_, duration());
 
         // Qt 6.4's FFmpeg backend does not reliably publish a replacement
@@ -926,6 +964,8 @@ void MotionPhotoPlayback::seek(qint64 milliseconds)
         // PausedState after publishing the target frame. Playing seeks retain
         // the normal pause/reposition/resume transition.
         if (!resumeAfterSeek) {
+            session_->pausedPreviewPositionMs = target;
+            session_->pausedPreviewFrame.reset();
             session_->previewedEnd = duration() > 0 && target >= duration();
             const qint64 previewTarget =
                 session_->previewedEnd ? std::max<qint64>(0, duration() - 100) : target;
@@ -950,6 +990,8 @@ void MotionPhotoPlayback::seek(qint64 milliseconds)
             session_->previewSeek->completing = false;
         }
         session_->previewedEnd = false;
+        session_->pausedPreviewPositionMs.reset();
+        session_->pausedPreviewFrame.reset();
         player->pause();
         player->setPosition(target);
         player->play();

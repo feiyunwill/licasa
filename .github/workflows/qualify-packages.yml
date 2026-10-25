@@ -22,8 +22,12 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
       - name: Require a disposable hosted VM and a release version
         id: version
         env:
@@ -32,6 +36,7 @@ jobs:
           test "$RUNNER_ENVIRONMENT" = github-hosted
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Check source-only installer and desktop assertions
         run: |
           sudo apt-get update
@@ -61,6 +66,9 @@ jobs:
         ubuntu: ['22.04', '24.04', '26.04']
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source_checks.outputs.source_sha }}
+          persist-credentials: false
       - name: Require a disposable hosted VM
         run: |
           test "$RUNNER_ENVIRONMENT" = github-hosted
@@ -131,7 +139,7 @@ jobs:
         with:
           name: ubuntu-${{ matrix.ubuntu }}-qualification
           path: reports/
-          retention-days: 3
+          retention-days: 90
           compression-level: 0
           if-no-files-found: error
 
@@ -145,6 +153,9 @@ jobs:
         desktop: [gnome, kde]
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source_checks.outputs.source_sha }}
+          persist-credentials: false
       - name: Require a disposable hosted VM
         run: test "$RUNNER_ENVIRONMENT" = github-hosted
       - name: Download and install the exact published Snap
@@ -167,7 +178,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3-pil xvfb dbus-x11 libglib2.0-bin x11-utils imagemagick \
+            python3-pil xvfb dbus-x11 libglib2.0-bin x11-utils xdotool imagemagick \
             mesa-utils libgl1-mesa-dri fonts-dejavu-core
           case "$DESKTOP" in
             gnome) sudo apt-get install -y --no-install-recommends gnome-shell ;;
@@ -192,6 +203,6 @@ jobs:
         with:
           name: snap-${{ matrix.desktop }}-qualification
           path: reports/
-          retention-days: 3
+          retention-days: 90
           compression-level: 0
           if-no-files-found: error

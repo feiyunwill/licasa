@@ -132,6 +132,7 @@ Column {
                 ActionChip {
                     required property var modelData
                     text: modelData.label
+                    checkable: true
                     checked: root.cropAspectPreset === modelData.key
                     accent: "#48FFFFFF"
                     animationDuration: root.buttonMotionDuration
@@ -142,6 +143,7 @@ Column {
                 ActionChip {
                     objectName: "editorCustomAspectChip"
                     text: "Custom"
+                checkable: true
                 checked: root.cropAspectPreset === "custom"
                     || root.customAspectEditorOpen
                 accent: "#48FFFFFF"
@@ -192,6 +194,8 @@ Column {
                         TextInput {
                             id: customWidthInput
                             objectName: "customAspectWidthInput"
+                            Accessible.name: "Horizontal aspect ratio"
+                            Accessible.description: "Enter the width proportion, then press Enter to apply."
                             anchors.fill: parent
                             anchors.leftMargin: 8
                             anchors.rightMargin: 8
@@ -250,6 +254,8 @@ Column {
                         TextInput {
                             id: customHeightInput
                             objectName: "customAspectHeightInput"
+                            Accessible.name: "Vertical aspect ratio"
+                            Accessible.description: "Enter the height proportion, then press Enter to apply."
                             anchors.fill: parent
                             anchors.leftMargin: 8
                             anchors.rightMargin: 8
@@ -282,6 +288,7 @@ Column {
                     width: Math.max(68, parent.width - x)
                     height: 38
                     text: "Apply"
+                    checkable: true
                     checked: root.cropAspectPreset === "custom"
                     enabled: root.customAspectRatioIsValid()
                     accent: "#48FFFFFF"
@@ -320,6 +327,7 @@ Column {
             ActionChip {
                 text: "Mirror H"
                 enabled: !root.cropMode
+                checkable: true
                 checked: root.flipHorizontal
                 animationDuration: root.buttonMotionDuration
                 onClicked: root.flipHorizontalToggled()
@@ -328,6 +336,7 @@ Column {
             ActionChip {
                 text: "Mirror V"
                 enabled: !root.cropMode
+                checkable: true
                 checked: root.flipVertical
                 animationDuration: root.buttonMotionDuration
                 onClicked: root.flipVerticalToggled()

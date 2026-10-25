@@ -6,6 +6,7 @@ Item {
     required property string iconName
     property string accessibleName: ""
     property bool checked: false
+    property bool checkable: false
     property int animationDuration: 140
     property color baseColor: "#1A1A1A"
     property color hoverColor: "#2A2A2A"
@@ -32,6 +33,8 @@ Item {
     Accessible.name: accessibleName
     Accessible.focusable: enabled
     Accessible.focused: activeFocus
+    Accessible.checkable: checkable
+    Accessible.checked: checkable && checked
     Accessible.onPressAction: clicked()
 
     Keys.onPressed: function(event) {
