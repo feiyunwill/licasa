@@ -23,6 +23,20 @@ Licasa is an image viewer and editor for the Linux desktop. It opens a photo fro
 
 If you try it, [report a bug or suggest a feature](https://github.com/sanxchep/licasa/issues/new).
 
+## Screenshots
+
+**Fullscreen viewer** — View your photos with minimal controls.
+
+![Licasa displaying a mountain photo in fullscreen mode](assets/screenshots/fullscreen-viewer.png)
+
+**Floating windows** — Keep multiple photos open on your desktop.
+
+![Licasa displaying three floating photo windows on the desktop](assets/screenshots/floating-windows.png)
+
+**Photo editor** — Adjust light, color, and detail, then save or export.
+
+![Licasa photo editor with light, color, and detail controls beside a mountain photo](assets/screenshots/photo-editor.png)
+
 ## Install
 
 Download the files for your system from the same [GitHub release](https://github.com/sanxchep/licasa/releases). The commands below use 0.7.1; substitute the filenames shown on the release page for another version. Each package has a matching `.sha256` file. Run the commands in the folder containing your downloads.
