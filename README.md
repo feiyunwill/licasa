@@ -35,7 +35,7 @@ Three short demos, recorded at original speed with **Background process** enable
 
 ![Opening, moving, and resizing a Licasa floating window at original speed](assets/demos/floating-resize.gif)
 
-**Keep multiple windows open** — Open additional views and arrange four floating windows.
+**Keep multiple windows open** — Open additional views and arrange floating windows.
 
 ![Opening additional Licasa floating windows and arranging four views at original speed](assets/demos/multiple-windows.gif)
 
