@@ -1,0 +1,145 @@
+name: Build native packages
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      artifact:
+        required: true
+        type: string
+      pr_checks:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - name: Select the native build recipe
+        id: target
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          case "$TARGET" in
+            ubuntu-24.04) echo 'recipe=packaging/build-deb.Dockerfile' >> "$GITHUB_OUTPUT" ;;
+            debian-13) echo 'recipe=packaging/build-debian.Dockerfile' >> "$GITHUB_OUTPUT" ;;
+            *) exit 1 ;;
+          esac
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v7
+        id: builder
+        with:
+          context: packaging
+          file: ${{ steps.target.outputs.recipe }}
+          load: true
+          pull: true
+          push: false
+          tags: licasa-verification:${{ inputs.target }}
+          cache-from: type=gha,scope=package-ci-${{ inputs.target }}
+          cache-to: type=gha,scope=package-ci-${{ inputs.target }},mode=min,ignore-error=true
+      - name: Restore only exact native dependency outputs
+        id: dependencies
+        uses: actions/cache@v5
+        with:
+          path: build/ci-package-dependencies/${{ inputs.target }}
+          key: package-ci-deps-v1-${{ inputs.target }}-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'packaging/qt-runtime-modules.json', 'packaging/verify-fresh-build.sh', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'tools/build_ubuntu_deb.py', 'tools/build_debian_deb.py', 'tools/build_ci_packages.py', 'tools/source_cache.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'cmake/strip_codec_rpath.cmake', 'cmake/LicasaRuntimeProfiles.cmake') }}
+      - name: Build and test the canonical native runtime and packages
+        env:
+          TARGET: ${{ inputs.target }}
+          REUSE: ${{ steps.dependencies.outputs.cache-hit }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          set -o pipefail
+          mkdir -p build/candidate-build-reports
+          reuse=()
+          if [ "$REUSE" = true ]; then reuse=(--reuse-dependencies); fi
+          python3 tools/build_ci_packages.py --target "$TARGET" --image "licasa-verification:$TARGET" \
+            --output "build/candidate-native/$TARGET" --dependencies "build/ci-package-dependencies/$TARGET" \
+            --jobs 3 "${reuse[@]}" 2>&1 | tee build/candidate-build-reports/build.log
+      - name: Retain immutable packages in the support manifest layout
+        env:
+          TARGET: ${{ inputs.target }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_ref }}
+        run: |
+          directory="build/candidate-native/$TARGET"
+          packages=build/candidate-packages
+          case "$TARGET" in
+            ubuntu-24.04)
+              mkdir -p "$packages/deb" "$packages/appimage"
+              cp "$directory/licasa_${VERSION}-1_amd64.deb" "$directory/licasa_${VERSION}-1_amd64.deb.sha256" "$packages/deb/"
+              cp "$directory/Licasa-${VERSION}-x86_64.AppImage" "$directory/Licasa-${VERSION}-x86_64.AppImage.sha256" "$packages/appimage/"
+              cp "$directory/install-licasa-appimage.sh" "$directory/install-licasa-appimage.sh.sha256" "$packages/appimage/"
+              (cd "$packages/deb" && sha256sum --check "licasa_${VERSION}-1_amd64.deb.sha256")
+              (cd "$packages/appimage" && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256" && sha256sum --check install-licasa-appimage.sh.sha256)
+              git rev-parse HEAD > "$packages/deb/source-commit.txt"
+              ;;
+            debian-13)
+              mkdir -p "$packages/debian13"
+              cp "$directory/licasa_${VERSION}-1+deb13_amd64.deb" "$directory/licasa_${VERSION}-1+deb13_amd64.deb.sha256" "$packages/debian13/"
+              (cd "$packages/debian13" && sha256sum --check "licasa_${VERSION}-1+deb13_amd64.deb.sha256")
+              git rev-parse HEAD > "$packages/debian13/source-commit.txt"
+              ;;
+          esac
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - name: Exercise pull-request package contracts
+        if: inputs.pr_checks
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          version="$(sed -nE '/^[[:space:]]*VERSION [0-9]+\.[0-9]+\.[0-9]+/s/^[[:space:]]*VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          directory="build/candidate-native/$TARGET"
+          mkdir -p build/candidate-build-reports/pr
+          case "$TARGET" in
+            ubuntu-24.04)
+              package="$directory/licasa_${version}-1_amd64.deb"
+              appimage="$directory/Licasa-${version}-x86_64.AppImage"
+              python3 tools/verify_deb_container.py "$package" --target ubuntu-24.04 --output build/candidate-build-reports/pr/native.json
+              python3 tools/check_package_report.py --target ubuntu24-native --package "$package" --report build/candidate-build-reports/pr/native.json
+              python3 tools/verify_appimage_container.py "$appimage" --target debian-13 --output build/candidate-build-reports/pr/trixie.json
+              python3 tools/check_package_report.py --target debian13-appimage --package "$appimage" --report build/candidate-build-reports/pr/trixie.json
+              python3 tools/verify_mate_accessibility_container.py "$appimage" --output build/candidate-build-reports/pr/accessibility.json
+              python3 tools/check_package_report.py --target debian13-mate-accessibility --package "$appimage" --report build/candidate-build-reports/pr/accessibility.json
+              ;;
+            debian-13)
+              package="$directory/licasa_${version}-1+deb13_amd64.deb"
+              python3 tools/verify_deb_container.py "$package" --target debian-13 --output build/candidate-build-reports/pr/native.json
+              python3 tools/check_package_report.py --target debian13-native --package "$package" --report build/candidate-build-reports/pr/native.json
+              python3 tools/verify_native_dialog_container.py "$package" --target debian-13 --output build/candidate-build-reports/pr/gtk.json
+              python3 tools/check_package_report.py --target debian13-native-gtk --package "$package" --report build/candidate-build-reports/pr/gtk.json
+              ;;
+          esac
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact }}
+          path: build/candidate-packages/
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-build-${{ inputs.target }}
+          path: |
+            build/candidate-build-reports/
+            build/candidate-native/${{ inputs.target }}/*.json
+            build/candidate-native/${{ inputs.target }}/qt-runtime-memory/
+          retention-days: 90
+          if-no-files-found: error

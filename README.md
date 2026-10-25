@@ -197,13 +197,7 @@ The `.deb`, AppImage, and SHA-256 files appear in `build/deb-output/`. Docker is
 
 ## Verify desktop launches
 
-Pull requests that change runtime code, QML, build recipes, package tools, or their tests build actual Ubuntu and Debian packages in disposable hosted jobs. Those jobs exercise native packages, the portable package on Trixie, MATE/AT-SPI, and Debian's native GTK picker using the same source recipes as release candidates. Documentation-only changes keep the fast source and support-contract checks. PR evidence cannot authorize a stable release; every release candidate still runs the complete support matrix below.
-
-To verify a development branch before publication, dispatch **Build and verify** at that branch with `verify_candidate=true` and `expected_sha` set to its full commit hash. It builds every candidate package, runs the complete support matrix including confined Snap on GNOME and Plasma, and retains the hash-bound `licasa-verification-evidence` artifact for 90 days. This route has read-only repository permissions and no release or Store upload steps; its evidence cannot authorize stable promotion.
-
-Release maintainers first build all artifacts with the package workflow, then dispatch **Qualify exact release candidate** at that candidate's tag with its build run ID. It checks out the exact candidate source, downloads those same build artifacts, and runs the support manifest's package and dialog matrix. **Approve stable and mark GitHub release latest** requires both build and qualification run IDs, validates every package and evidence hash, and keeps the existing Snap revision checks and approval environment. A missing target, skipped interaction, mismatched source, changed artifact, or incomplete evidence blocks promotion. Evidence remains in Actions for 90 days and the successful bundle is attached to the stable GitHub release for durable retention. The older published-package qualification workflow remains useful for diagnosis, but cannot authorize promotion.
-
-The package gates exercise Open, cancel, reopen, visible photo selection, Save As, decoded output, and all lazy dialog imports on X11 and Wayland with both renderers. A deliberately removed FolderListModel module must reject assembly and produce a recoverable error without losing the image or edits; Snap's immutable runtime keeps its production negative tests instead. Eight Motion Photo cases cover both displays, renderers, and video rotations using pinned embedded videos, then verify playback controls, frame capture, orientation, private FFmpeg loading, and teardown. These checks run against installed packages, including confined Snap launchers.
+CI checks source builds, sanitizers, installed packages and desktop integration. Complete candidate verification covers every target in the support manifest before release.
 
 For the Debian-native candidate, build inside its own userspace:
 

@@ -31,7 +31,8 @@ class HostedCandidateTests(unittest.TestCase):
                 source_version(cmake, snap)
 
     def test_verification_has_no_publication_permissions_credentials_or_steps(self):
-        workflow = (ROOT / ".github/workflows/verify-candidate.yml").read_text()
+        workflow = "\n".join((ROOT / ".github/workflows" / name).read_text()
+                             for name in ("ci.yml", "build-native.yml"))
         for forbidden in (
             r"\b(?:contents|packages|deployments|id-token):\s*write\b",
             r"\bsecrets\b", r"^\s+environment:", r"\bsnapcraft\s+(?:upload|release)\b",
@@ -44,23 +45,14 @@ class HostedCandidateTests(unittest.TestCase):
         self.assertIn("push: false", workflow)
 
     def test_complete_contract_is_retained_and_cannot_authorize_promotion(self):
-        workflow = (ROOT / ".github/workflows/verify-candidate.yml").read_text()
-        caller = (ROOT / ".github/workflows/ci.yml").read_text()
-        candidate = caller.split("  candidate_verification:\n", 1)[1].split("  candidate_result:\n", 1)[0]
-        self.assertIn("needs: [candidate_request, package_contract, test]", candidate)
-        self.assertIn("!cancelled()", candidate)
-        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.verify_candidate", candidate)
-        for prerequisite in ("candidate_request", "package_contract", "test"):
-            self.assertIn(f"needs.{prerequisite}.result == 'success'", candidate)
-        # A skipped PR-only ancestor must not suppress this job implicitly,
-        # and an omitted candidate run must not leave requested verification green.
-        result = caller.split("  candidate_result:\n", 1)[1]
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        result = workflow.split("  result:\n", 1)[1]
         self.assertIn("always()", result)
-        self.assertIn('test "$REQUEST_RESULT" = success', result)
-        self.assertIn('test "$VERIFICATION_RESULT" = success', result)
-        self.assertIn("source_sha: ${{ github.sha }}", caller)
-        self.assertIn("expected_sha: ${{ inputs.expected_sha }}", caller)
-        self.assertIn("${{ fromJSON(needs.source.outputs.matrix) }}", workflow)
+        self.assertIn("CI_RESULTS: ${{ toJSON(needs) }}", result)
+        self.assertIn("python3 tools/ci_plan.py check", result)
+        self.assertIn("SOURCE_SHA: ${{ inputs.source_ref || github.sha }}", workflow)
+        self.assertIn("EXPECTED_SHA: ${{ inputs.expected_sha }}", workflow)
+        self.assertIn("${{ fromJSON(needs.plan.outputs.matrix) }}", workflow)
         self.assertIn("desktop: [gnome, kde]", workflow)
         self.assertIn("tools/qualification_evidence.py run-target", workflow)
         self.assertIn("tools/qualification_evidence.py assemble", workflow)
@@ -70,7 +62,7 @@ class HostedCandidateTests(unittest.TestCase):
         self.assertNotIn("name: licasa-candidate-qualification", workflow)
         promotion = (ROOT / ".github/workflows/publish-release.yml").read_text()
         self.assertIn("'.github/workflows/qualify-candidate.yml'", promotion)
-        self.assertNotIn("'.github/workflows/verify-candidate.yml'", promotion)
+        self.assertNotIn("'.github/workflows/ci.yml'", promotion)
 
 
 if __name__ == "__main__":
