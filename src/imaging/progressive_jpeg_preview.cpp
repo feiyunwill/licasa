@@ -5,10 +5,10 @@
 #include <QImageReader>
 
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <jpeglib.h>
 #include <setjmp.h>
+#include <utility>
 
 namespace Licasa {
 namespace {
@@ -25,11 +25,8 @@ struct State {
     jpeg_decompress_struct jpeg{};
     JpegError error{};
     FILE* file = nullptr;
-    unsigned char* pixels = nullptr;
+    QImage image;
     bool created = false;
-    unsigned width = 0;
-    unsigned height = 0;
-    unsigned stride = 0;
 };
 
 void onJpegError(j_common_ptr info)
@@ -53,7 +50,6 @@ void release(State* state)
     if (state->file) {
         std::fclose(state->file);
     }
-    std::free(state->pixels);
     delete state;
 }
 
@@ -116,7 +112,9 @@ State* decodeFirstScans(const QByteArray& fileName, const QSize& requestedSize,
     state->jpeg.out_color_space = JCS_RGB;
     state->jpeg.buffered_image = TRUE;
     jpeg_calc_output_dimensions(&state->jpeg);
-    const quint64 outputBytes = quint64(state->jpeg.output_width) * state->jpeg.output_height * 3;
+    // The final owning RGB888 raster aligns each row to four bytes.
+    const quint64 outputStride = (quint64(state->jpeg.output_width) * 3 + 3) & ~quint64(3);
+    const quint64 outputBytes = outputStride * state->jpeg.output_height;
     const int allocationMiB = QImageReader::allocationLimit();
     if (outputBytes == 0 || outputBytes > maximumPreviewBytes ||
         (allocationMiB > 0 && outputBytes > quint64(allocationMiB) * 1024 * 1024)) {
@@ -125,11 +123,11 @@ State* decodeFirstScans(const QByteArray& fileName, const QSize& requestedSize,
     }
     jpeg_start_decompress(&state->jpeg);
     jpeg_start_output(&state->jpeg, earlyScan);
-    state->width = state->jpeg.output_width;
-    state->height = state->jpeg.output_height;
-    state->stride = state->width * 3;
-    state->pixels = static_cast<unsigned char*>(std::malloc(outputBytes));
-    if (!state->pixels) {
+    // Keep the owning raster in the heap state so libjpeg's longjmp error
+    // path can release it without skipping a stack object's destructor.
+    state->image = QImage(int(state->jpeg.output_width), int(state->jpeg.output_height),
+                          QImage::Format_RGB888);
+    if (state->image.isNull() || quint64(state->image.sizeInBytes()) != outputBytes) {
         release(state);
         return nullptr;
     }
@@ -138,7 +136,7 @@ State* decodeFirstScans(const QByteArray& fileName, const QSize& requestedSize,
             release(state);
             return nullptr;
         }
-        JSAMPROW row = state->pixels + size_t(state->jpeg.output_scanline) * state->stride;
+        JSAMPROW row = state->image.scanLine(int(state->jpeg.output_scanline));
         if (jpeg_read_scanlines(&state->jpeg, &row, 1) != 1) {
             release(state);
             return nullptr;
@@ -161,14 +159,7 @@ QImage readEarlyProgressiveJpegPreview(const QString& path, const QSize& request
     if (!state) {
         return {};
     }
-    QImage image(state->pixels, int(state->width), int(state->height), int(state->stride),
-                 QImage::Format_RGB888);
-    if (image.isNull()) {
-        release(state);
-        return {};
-    }
-    // The output image must own its pixels before the libjpeg state is freed.
-    QImage owned = image.copy();
+    QImage owned = std::move(state->image);
     release(state);
     if (owned.isNull()) {
         return {};

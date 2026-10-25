@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <vector>
 
 namespace Licasa {
@@ -20,6 +22,7 @@ namespace {
 constexpr quint64 kMaximumSourcePixels = 200000000;
 constexpr tmsize_t kMaximumScanlineBytes = 1024 * 1024;
 constexpr tmsize_t kMaximumStripBytes = 8 * 1024 * 1024;
+constexpr size_t kMaximumSamplingOffsets = 64 * 1024 / sizeof(uint32_t);
 
 QSize outputSize(const QSize& source, const QSize& requested, quint64 maximumPixels)
 {
@@ -163,6 +166,24 @@ QImage readFastTiffPreview(const QString& path, const QSize& requestedSize,
         return {};
     }
 
+    // Reuse the exact floor mapping across rows, with at most 64 KiB of
+    // additional scratch. Very wide outputs keep the original direct mapping.
+    std::vector<uint32_t> sourceColumns;
+    if (size_t(target.width()) <= kMaximumSamplingOffsets) {
+        try {
+            sourceColumns.resize(size_t(target.width()));
+        } catch (const std::bad_alloc&) {
+            // Sampling remains valid without the optional coordinate table.
+        }
+        for (size_t x = 0; x < sourceColumns.size(); ++x) {
+            sourceColumns[x] = uint32_t(quint64(x) * width / quint64(target.width()));
+        }
+    }
+    const auto sourceColumn = [&](int x) {
+        return sourceColumns.empty() ? uint32_t(quint64(x) * width / quint64(target.width()))
+                                     : sourceColumns[size_t(x)];
+    };
+
     std::vector<quint16> grayScanline(gray16 ? size_t((scanlineBytes + 1) / 2) : 0);
     std::vector<quint16> stripBuffer(gray16 ? 0 : size_t((stripBytes + 1) / 2));
     tstrip_t loadedStrip = std::numeric_limits<tstrip_t>::max();
@@ -196,17 +217,27 @@ QImage readFastTiffPreview(const QString& path, const QSize& requestedSize,
             sourceBytes = reinterpret_cast<const uchar*>(stripBuffer.data()) + rowOffset;
         }
         uchar* output = image.scanLine(y);
-        const auto* sourceGray = reinterpret_cast<const quint16*>(sourceBytes);
-        for (int x = 0; x < target.width(); ++x) {
-            const uint32_t sourceX = uint32_t(quint64(x) * width / quint64(target.width()));
-            if (gray16) {
-                const quint16 value = sourceGray[sourceX];
+        if (gray16) {
+            const auto* sourceGray = reinterpret_cast<const quint16*>(sourceBytes);
+            for (int x = 0; x < target.width(); ++x) {
+                const quint16 value = sourceGray[sourceColumn(x)];
                 output[x] = uchar(
                     (photometric == PHOTOMETRIC_MINISWHITE ? quint16(65535 - value) : value) >> 8);
-            } else {
-                const int sourceOffset = int(sourceX) * bytesPerPixel;
-                const int outputOffset = x * bytesPerPixel;
-                std::copy_n(sourceBytes + sourceOffset, bytesPerPixel, output + outputOffset);
+            }
+        } else if (target.width() == int(width)) {
+            // The admitted strip already has the output channel order. Copy
+            // visible bytes only; QImage may pad the end of an RGB888 row.
+            std::memcpy(output, sourceBytes, size_t(width) * size_t(bytesPerPixel));
+        } else if (rgb8) {
+            for (int x = 0; x < target.width(); ++x) {
+                const uchar* pixel = sourceBytes + size_t(sourceColumn(x)) * 3;
+                output[3 * x] = pixel[0];
+                output[3 * x + 1] = pixel[1];
+                output[3 * x + 2] = pixel[2];
+            }
+        } else {
+            for (int x = 0; x < target.width(); ++x) {
+                std::memcpy(output + 4 * x, sourceBytes + size_t(sourceColumn(x)) * 4, 4);
             }
         }
     }

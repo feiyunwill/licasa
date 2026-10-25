@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Build pinned, minimal image codecs in a user-owned prefix (no sudo)."""
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,7 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from source_cache import add_source_arguments, fetch_archive
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_SOURCE_BYTES = 256 * 1024 * 1024
@@ -33,28 +32,10 @@ def archive_name(name, spec):
     return f"{name}-{spec['version']}{suffixes}"
 
 
-def prepare_archive_source(name, spec, downloads, source):
-    archive = downloads / archive_name(name, spec)
-    if not archive.exists():
-        print(f"Downloading {name} {spec['version']}", flush=True)
-        temporary = archive.with_name(archive.name + ".partial")
-        try:
-            with urlopen(spec["url"], timeout=60) as response, temporary.open("wb") as output:
-                total = 0
-                while block := response.read(1024 * 1024):
-                    total += len(block)
-                    if total > MAX_SOURCE_BYTES:
-                        raise RuntimeError("codec archive exceeded download bound")
-                    output.write(block)
-            temporary.replace(archive)
-        finally:
-            temporary.unlink(missing_ok=True)
-    with archive.open("rb") as content:
-        actual = hashlib.file_digest(content, "sha256").hexdigest()
-    if actual != spec["sha256"]:
-        raise RuntimeError(
-            f"Checksum mismatch: {archive} (expected {spec['sha256']}, got {actual})"
-        )
+def prepare_archive_source(name, spec, downloads, source, offline=False):
+    algorithm = "sha256" if "sha256" in spec else "sha512"
+    archive = fetch_archive(downloads, spec["url"], spec[algorithm],
+                            name=archive_name(name, spec), algorithm=algorithm, offline=offline)
     if not source.exists() or not any(source.iterdir()):
         source.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=downloads) as unpack:
@@ -76,7 +57,12 @@ def git_output(source, *args):
     ).stdout.strip()
 
 
-def prepare_git_source(name, spec, source):
+def prepare_git_source(name, spec, source, offline=False, source_cache=None):
+    if source_cache is not None:
+        cached = source_cache / "git" / f"{name}-{spec['commit']}"
+        prepare_git_source(name, spec, cached, offline=offline)
+        if not source.exists():
+            shutil.copytree(cached, source)
     if shutil.which("git") is None:
         raise RuntimeError(f"git is required to prepare pinned source {name}")
     commit = spec["commit"].lower()
@@ -102,6 +88,8 @@ def prepare_git_source(name, spec, source):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     ).returncode == 0
     if not have_commit:
+        if offline:
+            raise RuntimeError(f"Offline Git input missing: {name} {commit} in {source}")
         print(f"Fetching {name} pinned commit {commit}", flush=True)
         subprocess.run(
             ["git", "-c", "fetch.fsckObjects=true", "-C", str(source), "fetch",
@@ -124,12 +112,12 @@ def prepare_git_source(name, spec, source):
         raise RuntimeError(f"Pinned git source exceeded size bound: {source}")
 
 
-def prepare_source(name, spec, downloads, source):
+def prepare_source(name, spec, downloads, source, offline=False, source_cache=None):
     source_type = spec.get("source_type", "archive")
     if source_type == "archive":
-        prepare_archive_source(name, spec, downloads, source)
+        prepare_archive_source(name, spec, downloads, source, offline)
     elif source_type == "git":
-        prepare_git_source(name, spec, source)
+        prepare_git_source(name, spec, source, offline, source_cache)
     else:
         raise RuntimeError(f"Unsupported source_type for {name}: {source_type}")
 
@@ -199,8 +187,9 @@ def install_libyuv(build, source, prefix, version):
 
 def build_rawspeed3(source, build, prefix, spec, jobs):
     """Build LibRaw's pinned RawSpeed3 wrapper in this codec prefix only."""
+    if shutil.which("xmllint") is None:
+        raise RuntimeError("xmllint is required to validate the pinned RawSpeed3 camera data")
     pinned = build.parent / "rawspeed3-pinned"
-    prepare_git_source("rawspeed3", spec["rawspeed3"], pinned)
     rawspeed_source = build / "rawspeed3-source"
     if not rawspeed_source.exists():
         shutil.copytree(pinned, rawspeed_source, ignore=shutil.ignore_patterns(".git"))
@@ -223,6 +212,14 @@ def build_rawspeed3(source, build, prefix, spec, jobs):
         else:
             subprocess.run(command + ["--reverse", "--dry-run"], cwd=rawspeed_source,
                            check=True, stdout=subprocess.DEVNULL)
+
+    for patch_name in spec["rawspeed3"].get("patches", []):
+        command = ["patch", "--batch", "-p1", "-i", str(ROOT / patch_name)]
+        if subprocess.run(command + ["--forward", "--dry-run"], cwd=rawspeed_source,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            subprocess.run(command + ["--forward"], cwd=rawspeed_source, check=True)
+        else:
+            subprocess.run(command + ["--reverse", "--dry-run"], cwd=rawspeed_source, check=True)
 
     wrapper = build / "rawspeed3-capi"
     wrapper.mkdir(parents=True, exist_ok=True)
@@ -259,11 +256,14 @@ def build_rawspeed3(source, build, prefix, spec, jobs):
     rawspeed_build = build / "rawspeed3-build"
     subprocess.run([
         "cmake", "-S", str(project), "-B", str(rawspeed_build),
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
         "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_INSTALL_PREFIX={prefix}",
         f"-DRAWSPEED_SOURCE={rawspeed_source}", f"-DRAWSPEED_CAPI_DIR={wrapper}",
         "-DBINARY_PACKAGE_BUILD=ON", "-DWITH_OPENMP=OFF", "-DWITH_JPEG=OFF",
         "-DWITH_ZLIB=OFF", "-DWITH_PUGIXML=ON", "-DUSE_BUNDLED_PUGIXML=ON",
-        "-DALLOW_DOWNLOADING_PUGIXML=ON", "-DRAWSPEED_ENABLE_WERROR=OFF",
+        "-DALLOW_DOWNLOADING_PUGIXML=OFF",
+        f"-DPUGIXML_PATH={build.parent / ('pugixml-' + spec['rawspeed3']['pugixml']['version'])}",
+        "-DUSE_XMLLINT=ON", "-DRAWSPEED_ENABLE_WERROR=OFF",
         "-DBUILD_TESTING=OFF", "-DBUILD_TESTS=OFF", "-DBUILD_FUZZERS=OFF",
         "-DRAWSPEED_ENABLE_DEBUG_INFO=OFF", "-DBUILD_SHARED_LIBS=OFF",
         "-DCMAKE_CXX_FLAGS=-fstack-protector-strong",
@@ -304,6 +304,8 @@ def build_libraw(source, build, prefix, spec, flags, env, jobs, sanitized,
             f" -DUSE_RAWSPEED3 -DUSE_RAWSPEED_BITS"
             f" -I{source / 'RawSpeed3/rawspeed3_c_api'}")
         native_env["LIBS"] = f"-L{prefix / 'lib'} -lrawspeed3"
+        native_env["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, (
+            str(prefix / "lib"), native_env.get("LD_LIBRARY_PATH", ""))))
         # The package keeps libraw_r and librawspeed3 side by side. Escape '$'
         # through make and the shell so the ELF records a literal $ORIGIN.
         native_env["LDFLAGS"] += " -Wl,-rpath,\\$$ORIGIN"
@@ -382,6 +384,7 @@ def selected_names(lock, requested):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_source_arguments(parser)
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build/codecs")
     parser.add_argument("--prefix", type=Path)
     parser.add_argument("--sanitizer", choices=("address", "undefined", "address,undefined"))
@@ -408,7 +411,8 @@ def main():
     work = args.work_dir.resolve()
     variant = args.sanitizer or "release"
     prefix = (args.prefix or work / (variant + "-prefix")).resolve()
-    downloads = work / "downloads"
+    source_cache = args.source_cache.resolve() if args.source_cache else None
+    downloads = source_cache / "archives" if source_cache else work / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     lock = json.loads((ROOT / "packaging/codecs.lock.json").read_text())
     try:
@@ -428,13 +432,29 @@ def main():
     # Do not accidentally cross-wire a developer's unrelated sysroot.
     env.pop("PKG_CONFIG_SYSROOT_DIR", None)
     env["PKG_CONFIG_PATH"] = str(prefix / "lib/pkgconfig")
+    # Resolve every input before compiling, including nested projects that used
+    # to download during CMake configuration. Offline mode fails at this phase.
     for name, spec in lock.items():
         if name not in selected:
             continue
         source = work / f"{name}-{spec['version']}"
-        prepare_source(name, spec, downloads, source)
+        prepare_source(name, spec, downloads, source, args.offline, source_cache)
         for dependency, pinned in spec.get("dependencies", {}).items():
-            prepare_source(dependency, pinned, downloads, source / pinned["path"])
+            prepare_source(dependency, pinned, downloads, source / pinned["path"],
+                           args.offline, source_cache)
+        if name == "libraw" and args.libraw_rawspeed3:
+            prepare_git_source("rawspeed3", spec["rawspeed3"], work / "rawspeed3-pinned",
+                               args.offline, source_cache)
+            pinned = spec["rawspeed3"]["pugixml"]
+            prepare_archive_source("pugixml", pinned, downloads,
+                                   work / f"pugixml-{pinned['version']}", args.offline)
+    if args.prepare_only:
+        print(f"Verified codec sources: {work}")
+        return
+    for name, spec in lock.items():
+        if name not in selected:
+            continue
+        source = work / f"{name}-{spec['version']}"
         for patch in spec.get("patches", []):
             command = ["patch", "--batch", "-p1", "-i", str(ROOT / patch)]
             check_patch = subprocess.run(command + ["--forward", "--dry-run"], cwd=source,
@@ -455,6 +475,7 @@ def main():
             build_meson(source, build, prefix, spec, flags, env, args.jobs, args.sanitizer)
         else:
             command = ["cmake", "-S", str(source), "-B", str(build),
+                   "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
                    "-DCMAKE_BUILD_TYPE=" + ("RelWithDebInfo" if args.sanitizer else "Release"),
                    f"-DCMAKE_INSTALL_PREFIX={prefix}", f"-DCMAKE_PREFIX_PATH={prefix}",
                    "-DCMAKE_INSTALL_RPATH=$ORIGIN",
@@ -506,8 +527,9 @@ def main():
             shutil.copy2(work / "rawspeed3-pinned/LICENSE", rawspeed_receipt / "LICENSE")
             for patch in (source / "RawSpeed3/patches").glob("*.patch"):
                 shutil.copy2(patch, rawspeed_receipt / patch.name)
-            pugixml_readme = (build / "rawspeed3-build/rawspeed-src/src/external/"
-                              "pugixml/src/readme.txt")
+            for patch in spec["rawspeed3"].get("patches", []):
+                shutil.copy2(ROOT / patch, rawspeed_receipt / Path(patch).name)
+            pugixml_readme = work / f"pugixml-{spec['rawspeed3']['pugixml']['version']}" / "readme.txt"
             shutil.copy2(pugixml_readme, rawspeed_receipt / "pugixml-readme.txt")
     provenance = prefix / "share/licenses/licasa-codecs/sources.json"
     provenance.parent.mkdir(parents=True, exist_ok=True)

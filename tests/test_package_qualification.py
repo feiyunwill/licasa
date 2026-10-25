@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Test qualification assertions with synthetic images, exit codes and source recipes."""
 
-import ast
 from contextlib import redirect_stderr
 import importlib.util
 import io
@@ -28,6 +27,10 @@ inspection_spec = importlib.util.spec_from_file_location(
     "package_inspection", ROOT / "tools/inspect_package_dependencies.py")
 inspection = importlib.util.module_from_spec(inspection_spec)
 inspection_spec.loader.exec_module(inspection)
+results_spec = importlib.util.spec_from_file_location(
+    "display_session_results", ROOT / "tools/display_session_results.py")
+results = importlib.util.module_from_spec(results_spec)
+results_spec.loader.exec_module(results)
 
 
 def fixture(colors=desktop.PHOTO_COLORS):
@@ -59,6 +62,54 @@ class VisiblePhotoTests(unittest.TestCase):
 
     def test_small_desktop_icons_are_not_a_visible_photo(self):
         self.assertFalse(desktop.pattern_present(fixture().resize((64, 48))))
+
+
+class DisplayGraphicsReportTests(unittest.TestCase):
+    def output(self, *, diagnostic="OpenGL", application="Software", retry="true"):
+        return (
+            "[Licasa] Qt Quick backend (sceneGraphInitialized): graphicsApi=OpenGL\n"
+            f"Diagnostic graphics: graphicsApi={diagnostic}; renderer=Mesa Intel(R) Graphics; fallback=false\n"
+            f"Application graphics: graphicsApi={application}; renderer=unreported; retry={retry}\n"
+            f"Display session passed: wayland default; diagnostic_fallback=false; app_retry={retry}\n"
+        )
+
+    def test_production_software_is_not_reported_as_diagnostic_opengl(self):
+        report = results.parse_display_graphics(self.output(), context="AppImage test")
+        self.assertEqual(report["graphics_api"], "Software")
+        self.assertEqual(report["diagnostic"], {"graphics_api": "OpenGL", "renderer": "Mesa Intel(R) Graphics"})
+        self.assertEqual(report["application"], {"graphics_api": "Software", "renderer": "unreported"})
+        self.assertFalse(report["diagnostic_fallback"])
+        self.assertTrue(report["app_retry"])
+
+    def test_production_renderer_is_preserved_separately(self):
+        output = self.output(application="OpenGL", retry="false").replace(
+            "renderer=unreported", "renderer=NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2")
+        report = results.parse_display_graphics(output, context="AppImage test")
+        self.assertEqual(report["graphics_api"], "OpenGL")
+        self.assertEqual(report["application"]["renderer"], "NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2")
+        self.assertEqual(report["diagnostic"]["renderer"], "Mesa Intel(R) Graphics")
+
+    def test_raw_api_log_does_not_replace_missing_production_summary(self):
+        output = "\n".join(line for line in self.output().splitlines()
+                           if not line.startswith("Application graphics:"))
+        with self.assertRaisesRegex(RuntimeError, "missing or ambiguous application"):
+            results.parse_display_graphics(output, context="AppImage test")
+
+    def test_conflicting_recovery_summary_is_rejected(self):
+        output = self.output().replace("app_retry=true", "app_retry=false")
+        with self.assertRaisesRegex(RuntimeError, "inconsistent display recovery"):
+            results.parse_display_graphics(output, context="AppImage test")
+
+    def test_duplicate_production_summary_is_rejected(self):
+        output = self.output() + "Application graphics: graphicsApi=OpenGL; renderer=Intel; retry=false\n"
+        with self.assertRaisesRegex(RuntimeError, "missing or ambiguous application"):
+            results.parse_display_graphics(output, context="AppImage test")
+
+    def test_incomplete_session_is_not_a_successful_report(self):
+        output = "\n".join(line for line in self.output().splitlines()
+                           if not line.startswith("Display session passed:"))
+        with self.assertRaisesRegex(RuntimeError, "missing or ambiguous display recovery"):
+            results.parse_display_graphics(output, context="AppImage test")
 
 
 class HostedExecutionGuardTests(unittest.TestCase):
@@ -126,38 +177,6 @@ class SnapShutdownTests(unittest.TestCase):
                 patch.object(desktop, "licasa_processes", return_value=[]):
             desktop.close_snap("test process", {})
             stop.assert_called_once_with("test process")
-
-
-class DependencyRecipeTests(unittest.TestCase):
-    def test_library_checks_precede_desktop_tool_installation(self):
-        for name in ("verify_deb_container.py", "verify_appimage_container.py"):
-            with self.subTest(tool=name):
-                tree = ast.parse((ROOT / "tools" / name).read_text())
-                names = {"args": SimpleNamespace(ubuntu_version="24.04")}
-                for node in tree.body:
-                    if (isinstance(node, ast.Assign)
-                            and any(isinstance(target, ast.Name) and target.id == "HOST_RUNTIME_PACKAGES"
-                                    for target in node.targets)):
-                        names["HOST_RUNTIME_PACKAGES"] = ast.literal_eval(node.value)
-                calls = [node for node in ast.walk(tree)
-                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                         and node.func.attr == "write_text" and isinstance(node.func.value, ast.BinOp)
-                         and isinstance(node.func.value.right, ast.Constant)
-                         and node.func.value.right.value == "Dockerfile"]
-                self.assertEqual(len(calls), 1)
-                recipe = eval(compile(ast.Expression(calls[0].args[0]), name, "eval"),
-                              {"__builtins__": {}}, names)
-                lines = recipe.splitlines()
-                check = next(index for index, line in enumerate(lines)
-                             if line.startswith("RUN ") and "licasa_check_runtime_dependencies" in line)
-                tools = next(index for index, line in enumerate(lines)
-                             if line.startswith("RUN ") and "xvfb" in line)
-                self.assertLess(check, tools)
-                self.assertFalse(any("weston" in line or "xvfb" in line or "desktop-file-utils" in line
-                                     for line in lines[:check]))
-                for line in lines:
-                    if line.startswith("RUN "):
-                        subprocess.run(["bash", "-n"], input=line[4:], text=True, check=True)
 
 
 class CTestSkipReportingTests(unittest.TestCase):

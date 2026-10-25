@@ -102,8 +102,15 @@
       "url": "https://github.com/darktable-org/rawspeed",
       "commit": "de70ef5fbc62cde91009c8cff7a206272abe631e",
       "tree": "9a3db3e8be3bf097ca02ebb178f9fed6fd1bafda",
-      "pugixml_version": "1.9",
-      "pugixml_sha512": "853a9d985aae537391c6524d5413ef4de237d99d96cc58ea7fe7152f786df1e408cdacd2e4387697e23c3e67cdc1d42b29de554501309eae16d86edd0e24785f"
+      "patches": [
+        "packaging/patches/rawspeed3-camera-schema-deterministic.patch"
+      ],
+      "pugixml": {
+        "version": "1.9",
+        "url": "https://github.com/zeux/pugixml/releases/download/v1.9/pugixml-1.9.tar.gz",
+        "sha512": "853a9d985aae537391c6524d5413ef4de237d99d96cc58ea7fe7152f786df1e408cdacd2e4387697e23c3e67cdc1d42b29de554501309eae16d86edd0e24785f",
+        "license": "MIT"
+      }
     },
     "build_system": "autotools",
     "configure_options": [

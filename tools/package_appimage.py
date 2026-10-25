@@ -65,13 +65,24 @@ def run(command: list[str], *, env: dict[str, str] | None = None, cwd: Path | No
     subprocess.run(command, check=True, env=env, cwd=cwd)
 
 
+def set_wayland_plugin_runpaths(appdir: Path, groups: tuple[str, ...]) -> None:
+    # These helpers are copied before linuxdeploy scans their dependencies, but
+    # linuxdeploy does not rewrite the copied files' loader search paths. Qt
+    # dlopens them after loading the generic Wayland platform, so they must find
+    # their own bundled dependencies without relying on another plugin having
+    # already loaded the EGL integration library.
+    for group in groups:
+        for plugin in sorted((appdir / "usr/plugins" / group).glob("*.so")):
+            run(["patchelf", "--set-rpath", "$ORIGIN/../../lib:$ORIGIN", str(plugin)])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", type=Path, help="Qualified Ubuntu 24.04 amd64 .deb")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/qualification/appimage")
     parser.add_argument("--tools-dir", type=Path, default=ROOT / "build/packaging-tools")
     args = parser.parse_args()
-    missing_tools = [name for name in ("dpkg-deb", "qmake6", "file")
+    missing_tools = [name for name in ("dpkg-deb", "qmake6", "file", "patchelf")
                      if shutil.which(name) is None]
     if missing_tools:
         parser.error("Missing AppImage build tools: " + ", ".join(missing_tools))
@@ -105,7 +116,9 @@ def main() -> None:
     wl_shell_library = qt_libraries / "libQt6WlShellIntegration.so.6"
     if not wl_shell_library.is_file():
         raise RuntimeError("Missing Qt Wayland shell integration library; install qt6-wayland")
-    forced_libraries = (wl_shell_library, *(qt_libraries / name for name in PORTABLE_RUNTIME_LIBRARIES))
+    wayland_egl_library = qt_libraries / "libQt6WaylandEglClientHwIntegration.so.6"
+    forced_libraries = (wl_shell_library, wayland_egl_library,
+                        *(qt_libraries / name for name in PORTABLE_RUNTIME_LIBRARIES))
     for library in forced_libraries:
         if not library.is_file():
             raise RuntimeError(f"Missing AppImage runtime library: {library}")
@@ -134,6 +147,7 @@ def main() -> None:
              "--icon-file", str(icon),
              *(argument for library in forced_libraries for argument in ("--library", str(library))),
              "--plugin", "qt"], env=env, cwd=work)
+        set_wayland_plugin_runpaths(appdir, wayland_plugin_groups)
         # Explicit --library requests override linuxdeploy's default exclusion
         # list and retain its dependency and copyright-file deployment.
         for library in forced_libraries:
@@ -148,6 +162,16 @@ def main() -> None:
             raise RuntimeError("AppDir is missing Qt Quick or its private backport")
         bundled_quick.unlink()
         bundled_quick.symlink_to("licasa/lib/libQt6Quick.so.6")
+        # FFmpeg's dependency scan can find the distro dav1d before AVIF's
+        # pinned private copy, depending on traversal order. Both have the same
+        # SONAME. Resolve all consumers to the published private runtime so a
+        # rebuild cannot silently select a different decoder implementation.
+        private_dav1d = appdir / "usr/lib/licasa/lib/libdav1d.so.7"
+        bundled_dav1d = appdir / "usr/lib/libdav1d.so.7"
+        if not private_dav1d.is_file() or not bundled_dav1d.is_file():
+            raise RuntimeError("AppDir is missing dav1d or its pinned private runtime")
+        bundled_dav1d.unlink()
+        bundled_dav1d.symlink_to("licasa/lib/libdav1d.so.7")
         for plugin in ("libqxcb.so", "libqoffscreen.so", *wayland_platforms):
             if not (appdir / "usr/plugins/platforms" / plugin).is_file():
                 raise RuntimeError(f"AppDir is missing Qt platform plugin: {plugin}")

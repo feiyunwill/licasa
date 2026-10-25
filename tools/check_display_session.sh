@@ -3,8 +3,79 @@
 # virtual X11 or Wayland session. Called from clean-package verification images.
 set -eu
 
-if [ "$#" -ne 5 ]; then
-    echo "Usage: $0 APP DIAGNOSTIC PHOTO x11|wayland default|software" >&2
+# Keep the final graphics decision usable against saved logs as well as a live
+# run. An OpenGL API can still be backed by llvmpipe, so it is not hardware proof.
+graphics_api() {
+    sed -n 's/.*Qt Quick backend (sceneGraphInitialized): graphicsApi=\([A-Za-z0-9]*\).*/\1/p' "$1" | tail -1
+}
+graphics_renderer() {
+    sed -n 's/.*OpenGL VENDOR: .* RENDERER: \(.*\) VERSION: .*/\1/p' "$1" | tail -1
+}
+check_graphics_results() {
+    diagnostic_log=$1
+    application_log=$2
+    diagnostic_fallback=$3
+    graphics_policy=$4
+    case "$diagnostic_fallback:$graphics_policy" in
+        true:allow-fallback|false:allow-fallback|true:require-accelerated|false:require-accelerated) ;;
+        *) echo "Invalid graphics result policy" >&2; return 2 ;;
+    esac
+    diagnostic_api=$(graphics_api "$diagnostic_log")
+    application_api=$(graphics_api "$application_log")
+    diagnostic_renderer=$(graphics_renderer "$diagnostic_log")
+    application_renderer=$(graphics_renderer "$application_log")
+    application_retry=false
+    if grep -Fq 'retrying once with the Qt software renderer' "$application_log"; then
+        application_retry=true
+    fi
+    for actual_api in "$diagnostic_api" "$application_api"; do
+        case "$actual_api" in
+            OpenGL|Vulkan|Software|OpenVG|Direct3D11|Direct3D12|Metal) ;;
+            *) echo "Missing or unusable initialized graphics API: ${actual_api:-unreported}" >&2; return 1 ;;
+        esac
+    done
+    if [ "$diagnostic_fallback" = true ] && [ "$diagnostic_api" != Software ]; then
+        echo "Diagnostic fallback did not initialize the software renderer" >&2
+        return 1
+    fi
+    if [ "$application_retry" = true ] && [ "$application_api" != Software ]; then
+        echo "Application retry did not initialize the software renderer" >&2
+        return 1
+    fi
+    echo "Diagnostic graphics: graphicsApi=$diagnostic_api; renderer=${diagnostic_renderer:-unreported}; fallback=$diagnostic_fallback"
+    echo "Application graphics: graphicsApi=$application_api; renderer=${application_renderer:-unreported}; retry=$application_retry"
+    if [ "$graphics_policy" = require-accelerated ]; then
+        if [ "$diagnostic_fallback" = true ] || [ "$application_retry" = true ]; then
+            echo "Accelerated qualification rejected a software fallback" >&2
+            return 1
+        fi
+        for renderer_pair in "$diagnostic_api:$diagnostic_renderer" "$application_api:$application_renderer"; do
+            case "$renderer_pair" in
+                OpenGL:?*) ;;
+                *) echo "Accelerated qualification requires an initialized API and a verifiable hardware renderer" >&2; return 1 ;;
+            esac
+            if printf '%s\n' "$renderer_pair" | grep -Eiq 'llvmpipe|softpipe|lavapipe|software[ _-]*(rasterizer|renderer)|swrast|openswr|swiftshader'; then
+                echo "Accelerated qualification rejected a software graphics driver: $renderer_pair" >&2
+                return 1
+            fi
+        done
+    fi
+}
+
+# Read-only assessment of retained qualification artifacts, also used by the
+# regression tests. This route does not start a display or an application.
+if [ "${1:-}" = --check-graphics-results ]; then
+    if [ "$#" -ne 5 ]; then
+        echo "Usage: $0 --check-graphics-results DIAGNOSTIC_LOG APPLICATION_LOG true|false allow-fallback|require-accelerated" >&2
+        exit 2
+    fi
+    shift
+    check_graphics_results "$@"
+    exit $?
+fi
+
+if [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
+    echo "Usage: $0 APP DIAGNOSTIC PHOTO x11|wayland default|software [allow-fallback|require-accelerated]" >&2
     exit 2
 fi
 app=$1
@@ -12,15 +83,24 @@ diagnostic=$2
 photo=$3
 protocol=$4
 mode=$5
+graphics_policy=${6:-allow-fallback}
 
 case "$protocol:$mode" in
     x11:default|x11:software|wayland:default|wayland:software) ;;
     *) echo "Unsupported display check: $protocol:$mode" >&2; exit 2 ;;
 esac
+case "$mode:$graphics_policy" in
+    default:allow-fallback|default:require-accelerated|software:allow-fallback) ;;
+    *) echo "Unsupported graphics policy: $mode:$graphics_policy" >&2; exit 2 ;;
+esac
 
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "${XDG_CONFIG_HOME:-$HOME/.config}"
 chmod 700 "$XDG_RUNTIME_DIR"
-unset QT_QUICK_BACKEND QSG_RHI_BACKEND LIBGL_ALWAYS_SOFTWARE
+unset QT_QUICK_BACKEND QSG_RHI_BACKEND LIBGL_ALWAYS_SOFTWARE LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT
+# The API and real driver must be captured for both the diagnostic and normal
+# launcher. QSG_INFO alone does not enable Qt 6.4's RHI driver information.
+export QSG_INFO=1
+export QT_LOGGING_RULES="${QT_LOGGING_RULES:+$QT_LOGGING_RULES;}qt.rhi.general.debug=true"
 if [ "$mode" = software ]; then
     export QT_QUICK_BACKEND=software LIBGL_ALWAYS_SOFTWARE=1
 fi
@@ -74,11 +154,11 @@ if [ "$protocol" = wayland ]; then
     fi
 fi
 
-# The diagnostic is packaged with the app. Resolve its own private libraries
-# from that package, without giving the normal launcher a developer override.
+# The diagnostic must resolve its libraries with the same deployed ELF search
+# paths as the production launcher. A diagnostic-only LD_LIBRARY_PATH can hide
+# broken plugin RUNPATHs, so only the package's Qt plugin/QML paths are selected.
 diagnostic_usr=$(dirname "$(dirname "$diagnostic")")
 run_diagnostic() (
-    export LD_LIBRARY_PATH="$diagnostic_usr/lib/licasa/lib:$diagnostic_usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export QT_PLUGIN_PATH="$diagnostic_usr/plugins:$diagnostic_usr/lib/licasa/plugins:$diagnostic_usr/lib/qt6/plugins"
     export QML2_IMPORT_PATH="$diagnostic_usr/qml:$diagnostic_usr/lib/qt6/qml"
     export QML_IMPORT_PATH="$QML2_IMPORT_PATH"
@@ -109,8 +189,15 @@ if run_diagnostic "$mode" >/tmp/licasa-display-report.json \
     :
 else
     status=$?
+    cp /tmp/licasa-display-report.json /tmp/licasa-display-report.initial.json
+    cp /tmp/licasa-display-diagnostic.log /tmp/licasa-display-diagnostic.initial.log
     if [ "$mode" = default ] && [ "$status" -eq 43 ]; then
         diagnostic_fallback=true
+        if [ "$graphics_policy" = require-accelerated ]; then
+            cat /tmp/licasa-display-diagnostic.log >&2
+            echo "Accelerated diagnostic failed; software fallback is not allowed in this qualification" >&2
+            exit 1
+        fi
         if ! run_diagnostic software >/tmp/licasa-display-report.json \
             2>/tmp/licasa-display-diagnostic.log; then
             cat /tmp/licasa-display-diagnostic.log >&2
@@ -192,14 +279,11 @@ if ! kill -0 "$viewer_pid" 2>/dev/null; then
     echo "Installed viewer did not remain open" >&2
     exit 1
 fi
-if [ "$app_retried" = true ] &&
-    ! grep -Fq 'Qt Quick backend (sceneGraphInitialized): graphicsApi=Software' \
-        /tmp/licasa-display-app.log; then
-    cat /tmp/licasa-display-app.log >&2
-    echo "Software retry did not initialize a scene graph" >&2
+check_graphics_results /tmp/licasa-display-diagnostic.log /tmp/licasa-display-app.log \
+    "$diagnostic_fallback" "$graphics_policy"
+if [ "$mode" = software ] &&
+    { [ "$diagnostic_api" != Software ] || [ "$application_api" != Software ]; }; then
+    echo "Explicit software qualification did not use the software backend in both processes" >&2
     exit 1
 fi
-
-grep -F 'Qt Quick backend (sceneGraphInitialized): graphicsApi=' \
-    /tmp/licasa-display-diagnostic.log | tail -1
-echo "Display session passed: $protocol $mode; diagnostic_fallback=$diagnostic_fallback; app_retry=$app_retried"
+echo "Display session passed: $protocol $mode; diagnostic_fallback=$diagnostic_fallback; app_retry=$application_retry"

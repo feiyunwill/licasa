@@ -6,6 +6,7 @@
 #include <QtEndian>
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -59,7 +60,7 @@ AndroidMotionPhotoDetection notMotionPhoto()
 bool parseSignedInteger(QStringView value, qint64* result)
 {
     bool ok = false;
-    const qint64 parsed = value.toString().trimmed().toLongLong(&ok, 10);
+    const qint64 parsed = value.trimmed().toLongLong(&ok, 10);
     if (!ok) {
         return false;
     }
@@ -69,7 +70,7 @@ bool parseSignedInteger(QStringView value, qint64* result)
 
 bool parseUnsignedInteger(QStringView value, quint64* result)
 {
-    const QString text = value.toString().trimmed();
+    const QStringView text = value.trimmed();
     if (text.startsWith(QLatin1Char('-'))) {
         return false;
     }

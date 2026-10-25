@@ -7,6 +7,7 @@
 #include <QImageIOPlugin>
 #include <QtEndian>
 
+#include <algorithm>
 #include <array>
 #include <limits>
 
@@ -62,9 +63,35 @@ class BufferedInput {
         return uchar(buffer_[position_++]);
     }
 
+    template <int Channels> bool literal(Pixel& pixel)
+    {
+        static_assert(Channels == 3 || Channels == 4);
+        if (available_ - position_ >= Channels) {
+            const auto* bytes = reinterpret_cast<const uchar*>(buffer_.data() + position_);
+            pixel.r = bytes[0];
+            pixel.g = bytes[1];
+            pixel.b = bytes[2];
+            if constexpr (Channels == 4) {
+                pixel.a = bytes[3];
+            }
+            position_ += Channels;
+            return true;
+        }
+        // A literal may straddle a refill or end in truncated input. Keep the
+        // checked byte reader for that boundary while handling normal literals
+        // with a single contiguous-range check.
+        const int r = byte(), g = byte(), b = byte();
+        const int a = Channels == 4 ? byte() : pixel.a;
+        if (r < 0 || g < 0 || b < 0 || a < 0) {
+            return false;
+        }
+        pixel = {uchar(r), uchar(g), uchar(b), uchar(a)};
+        return true;
+    }
+
   private:
     QIODevice* device_;
-    std::array<char, 64 * 1024> buffer_{};
+    std::array<char, 64 * 1024> buffer_;
     qsizetype position_ = 0;
     qsizetype available_ = 0;
 };
@@ -143,34 +170,30 @@ class QoiHandler final : public QImageIOHandler {
                 nextOutputY < outputSize.height() &&
                 y == (2ll * nextOutputY + 1) * sourceHeight / (2ll * outputSize.height());
             int nextOutputX = 0;
+            int nextSourceX = sourceWidth / (2ll * outputSize.width());
+            int nextCancellationX = 0;
             QRgb* row =
                 selectedRow ? reinterpret_cast<QRgb*>(decoded.scanLine(nextOutputY)) : nullptr;
-            for (int x = 0; x < sourceWidth; ++x) {
-                if ((x & 4095) == 0 && Licasa::ImageDecodeContract::cancelled(device())) {
-                    return false;
+            for (int x = 0; x < sourceWidth;) {
+                if (x >= nextCancellationX) {
+                    if (Licasa::ImageDecodeContract::cancelled(device())) {
+                        return false;
+                    }
+                    nextCancellationX = x + 4096;
                 }
-                if (run > 0) {
-                    --run;
-                } else {
+                if (run == 0) {
                     const int tag = input.byte();
                     if (tag < 0) {
                         return false;
                     }
                     if (tag == 0xfe) {
-                        const int r = input.byte(), g = input.byte(), b = input.byte();
-                        if (r < 0 || g < 0 || b < 0) {
+                        if (!input.literal<3>(pixel)) {
                             return false;
                         }
-                        pixel.r = uchar(r);
-                        pixel.g = uchar(g);
-                        pixel.b = uchar(b);
                     } else if (tag == 0xff) {
-                        const int r = input.byte(), g = input.byte(), b = input.byte(),
-                                  a = input.byte();
-                        if (r < 0 || g < 0 || b < 0 || a < 0) {
+                        if (!input.literal<4>(pixel)) {
                             return false;
                         }
-                        pixel = {uchar(r), uchar(g), uchar(b), uchar(a)};
                     } else {
                         switch (tag & 0xc0) {
                         case 0x00:
@@ -199,12 +222,43 @@ class QoiHandler final : public QImageIOHandler {
                     }
                     const int hash = (pixel.r * 3 + pixel.g * 5 + pixel.b * 7 + pixel.a * 11) & 63;
                     index[size_t(hash)] = pixel;
+                    ++run; // The tag's pixel and any QOI_OP_RUN repetitions form one span.
                 }
-                if (selectedRow && nextOutputX < outputSize.width() &&
-                    x == (2ll * nextOutputX + 1) * sourceWidth / (2ll * outputSize.width())) {
-                    row[nextOutputX] = qRgba(pixel.r, pixel.g, pixel.b, pixel.a);
-                    ++nextOutputX;
+                if (run == 1) {
+                    // Literal/diff/index-heavy images should keep the scalar
+                    // path: form a pixel only when this source pixel is selected.
+                    if (selectedRow && nextOutputX < outputSize.width() && x == nextSourceX) {
+                        row[nextOutputX++] = qRgba(pixel.r, pixel.g, pixel.b, pixel.a);
+                        nextSourceX = outputSize.width() == sourceWidth
+                                          ? x + 1
+                                          : int((2ll * nextOutputX + 1) * sourceWidth /
+                                                (2ll * outputSize.width()));
+                    }
+                    run = 0;
+                    ++x;
+                    continue;
                 }
+                const int count = std::min(run, sourceWidth - x);
+                const int spanEnd = x + count;
+                if (selectedRow) {
+                    const QRgb value = qRgba(pixel.r, pixel.g, pixel.b, pixel.a);
+                    if (outputSize.width() == sourceWidth) {
+                        std::fill(row + x, row + spanEnd, value);
+                        nextOutputX = spanEnd;
+                        nextSourceX = spanEnd;
+                    } else {
+                        // Compute a sample position only when an output pixel is
+                        // written. Long runs and unselected source pixels require
+                        // neither per-pixel division nor per-pixel expansion.
+                        while (nextOutputX < outputSize.width() && nextSourceX < spanEnd) {
+                            row[nextOutputX++] = value;
+                            nextSourceX = int((2ll * nextOutputX + 1) * sourceWidth /
+                                              (2ll * outputSize.width()));
+                        }
+                    }
+                }
+                run -= count;
+                x = spanEnd;
             }
             if (selectedRow) {
                 if (nextOutputX != outputSize.width()) {

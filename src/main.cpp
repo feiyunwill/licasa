@@ -38,6 +38,7 @@ int main(int argc, char* argv[])
     Licasa::configureSurfaceFormatForRequestedOpenGL();
 
     QGuiApplication application(argc, argv);
+    Licasa::configureSurfaceFormatForPlatform(QGuiApplication::platformName());
     application.setApplicationName(QString::fromLatin1(Licasa::Constants::applicationName));
     application.setApplicationDisplayName(QString::fromLatin1(Licasa::Constants::applicationName));
     application.setOrganizationName(QString::fromLatin1(Licasa::Constants::organizationName));

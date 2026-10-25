@@ -6,20 +6,20 @@ qt6-shadertools-dev in addition to the normal application build dependencies.
 --qt-prefix also accepts an unpacked development prefix; no system install is made.
 """
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tarfile
-from urllib.request import urlopen
+from source_cache import add_source_arguments, fetch_archive
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_source_arguments(parser)
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build/deps")
     parser.add_argument("--qt-prefix", type=Path)
     parser.add_argument(
@@ -42,28 +42,17 @@ def main():
     work = args.work_dir.resolve()
     spec_path = ROOT / "packaging/qt-backport.lock.json"
     spec = json.loads(spec_path.read_text())
-    archive = work / "downloads" / spec["url"].rsplit("/", 1)[1]
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    if not archive.exists():
-        temporary = archive.with_suffix(".partial")
-        try:
-            with urlopen(spec["url"], timeout=60) as response, temporary.open("wb") as output:
-                total = 0
-                while block := response.read(1024 * 1024):
-                    total += len(block)
-                    if total > 128 * 1024 * 1024:
-                        raise RuntimeError("Qt source archive exceeded download bound")
-                    output.write(block)
-            temporary.replace(archive)
-        finally:
-            temporary.unlink(missing_ok=True)
-    with archive.open("rb") as data:
-        if hashlib.file_digest(data, "sha256").hexdigest() != spec["sha256"]:
-            raise RuntimeError("Qt source checksum mismatch")
+    downloads = args.source_cache.resolve() / "archives" if args.source_cache else work / "downloads"
+    archive = fetch_archive(downloads, spec["url"], spec["sha256"], offline=args.offline,
+                            limit=128 * 1024 * 1024)
+    work.mkdir(parents=True, exist_ok=True)
     source = work / f"qtdeclarative-everywhere-src-{spec['version']}"
     if not source.exists():
         with tarfile.open(archive) as bundle:
             bundle.extractall(work, filter="data")
+    if args.prepare_only:
+        print(f"Verified Qt Quick sources: {work}")
+        return
     patch = ROOT / spec["patch"]
     command = ["patch", "--batch", "-p1", "-i", str(patch)]
     if subprocess.run(command + ["--forward", "--dry-run"], cwd=source,

@@ -7,10 +7,11 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
+
+from display_session_results import parse_display_graphics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,11 +28,22 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="licasa-rpm-verify-") as temporary:
         work = Path(temporary)
         shutil.copy2(package, work / "licasa.rpm")
+        shutil.copy2(ROOT / "packaging/install-licasa-appimage.sh", work / "check-runtime.sh")
         (work / "Dockerfile").write_text(
             "FROM fedora:44\n"
             "COPY licasa.rpm /tmp/licasa.rpm\n"
+            "COPY check-runtime.sh /opt/check-runtime.sh\n"
             "RUN dnf install -y --setopt=install_weak_deps=False "
-            "/tmp/licasa.rpm desktop-file-utils xdg-utils "
+            "/tmp/licasa.rpm && dnf clean all\n"
+            "RUN bash -ec '. /opt/check-runtime.sh; licasa_check_runtime_dependencies "
+            "/opt/licasa/usr/lib/licasa/lib:/opt/licasa/usr/lib /opt/licasa/usr'\n"
+            "RUN dnf reinstall -y --setopt=install_weak_deps=False /tmp/licasa.rpm "
+            "&& dnf remove -y --noautoremove licasa-appimage "
+            "&& test ! -e /opt/licasa && test ! -e /usr/bin/licasa "
+            "&& test ! -e /usr/share/applications/licasa.desktop "
+            "&& test ! -e /usr/share/icons/hicolor/512x512/apps/licasa.png "
+            "&& dnf install -y --setopt=install_weak_deps=False /tmp/licasa.rpm\n"
+            "RUN dnf install -y --setopt=install_weak_deps=False desktop-file-utils xdg-utils "
             "xorg-x11-server-Xvfb xwininfo weston mesa-dri-drivers "
             "&& dnf clean all\n"
             "USER 65534:65534\n"
@@ -66,20 +78,14 @@ def main() -> None:
             if result.returncode:
                 raise RuntimeError(f"Fedora RPM {name} failed:\n"
                                    f"{result.stdout}\n{result.stderr}")
-            graphics = re.search(r"graphicsApi=([A-Za-z0-9]+)", result.stdout)
-            fallback = re.search(r"diagnostic_fallback=(true|false); app_retry=(true|false)",
-                                 result.stdout)
-            if not graphics or not fallback:
-                raise RuntimeError(f"Fedora RPM {name} has incomplete results:\n"
-                                   f"{result.stdout}")
-            displays[name] = {"graphics_api": graphics.group(1),
-                              "diagnostic_fallback": fallback.group(1) == "true",
-                              "app_retry": fallback.group(2) == "true"}
+            displays[name] = parse_display_graphics(result.stdout, context=f"Fedora RPM {name}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
         "fedora_version": 44,
         "rpm_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
         "clean_install": True,
+        "runtime_checked_before_desktop_tools": True,
+        "package_reinstall_and_removal_checked": True,
         "desktop_valid": True,
         "jpeg_default_selected": True,
         "viewer_launched": True,

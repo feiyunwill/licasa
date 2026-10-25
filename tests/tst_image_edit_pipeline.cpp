@@ -5,6 +5,7 @@
 #include <QRandomGenerator>
 #include <QScopeGuard>
 #include <QTest>
+#include <QTransform>
 
 #include <algorithm>
 #include <cmath>
@@ -105,6 +106,15 @@ class ImageEditPipelineTest final : public QObject {
                 edit.*field = random.generateDouble() * 2.0 - 1.0;
             }
             edit.vignette = std::abs(edit.vignette);
+            cases.append(edit);
+            // Channel tables must agree both with RGB-dependent stages enabled
+            // and with only the channel-independent controls combined.
+            edit.highlights = 0.0;
+            edit.shadows = 0.0;
+            cases.append(edit);
+            edit.saturation = 0.0;
+            edit.vibrance = 0.0;
+            edit.vignette = 0.0;
             cases.append(edit);
         }
         for (const QSize size :
@@ -211,6 +221,96 @@ class ImageEditPipelineTest final : public QObject {
         QVERIFY(edited);
         QCOMPARE(requested, Licasa::ImageEditBackend::Cpu);
         QCOMPARE(used, Licasa::ImageEditBackend::Cpu);
+    }
+
+    void composedGeometryMatchesQtAndPreservesMetadata()
+    {
+        QRandomGenerator random(0x9167u);
+        for (const QSize size : {QSize(1, 1), QSize(1, 7), QSize(7, 1), QSize(32, 17)}) {
+            const QImage raster = randomImage(size, random);
+            for (auto format : {QImage::Format_Mono, QImage::Format_Indexed8, QImage::Format_RGB888,
+                                QImage::Format_ARGB32, QImage::Format_ARGB32_Premultiplied,
+                                QImage::Format_RGBA64}) {
+                QImage source = raster.convertToFormat(format);
+                source.setOffset(QPoint(7, 9));
+                source.setDotsPerMeterX(1234);
+                source.setDotsPerMeterY(4321);
+                for (int turns = 0; turns < 4; ++turns) {
+                    for (bool horizontal : {false, true}) {
+                        for (bool vertical : {false, true}) {
+                            QTransform rotation;
+                            rotation.rotate(turns * 90.0);
+                            QImage expected =
+                                source.transformed(rotation).mirrored(horizontal, vertical);
+                            if (!expected.colorSpace().isValid()) {
+                                expected.setColorSpace(QColorSpace::SRgb);
+                            }
+                            Licasa::ImageEditParameters edit;
+                            edit.quarterTurns = turns;
+                            edit.flipHorizontal = horizontal;
+                            edit.flipVertical = vertical;
+                            for (bool shared : {false, true}) {
+                                QImage actual = shared ? source : source.copy();
+                                if (!shared) {
+                                    actual.setOffset(source.offset());
+                                }
+                                QVERIFY(Licasa::applyImageEdits(actual, edit));
+                                QCOMPARE(actual, expected);
+                                QVERIFY2(actual.offset() == expected.offset(),
+                                         qPrintable(QStringLiteral(
+                                                        "size=%1x%2 format=%3 turns=%4 h=%5 v=%6 "
+                                                        "shared=%7 offset=%8,%9 expected=%10,%11")
+                                                        .arg(size.width())
+                                                        .arg(size.height())
+                                                        .arg(int(format))
+                                                        .arg(turns)
+                                                        .arg(horizontal)
+                                                        .arg(vertical)
+                                                        .arg(shared)
+                                                        .arg(actual.offset().x())
+                                                        .arg(actual.offset().y())
+                                                        .arg(expected.offset().x())
+                                                        .arg(expected.offset().y())));
+                                QCOMPARE(actual.colorSpace(), expected.colorSpace());
+                                QCOMPARE(actual.devicePixelRatio(), expected.devicePixelRatio());
+                                QCOMPARE(actual.dotsPerMeterX(), expected.dotsPerMeterX());
+                                QCOMPARE(actual.dotsPerMeterY(), expected.dotsPerMeterY());
+                                QCOMPARE(actual.text("caption"), expected.text("caption"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void halfTurnReusesOwnedRaster()
+    {
+        QRandomGenerator random(0x77a1u);
+        for (bool horizontal : {false, true}) {
+            for (bool vertical : {false, true}) {
+                QImage actual = randomImage(QSize(37, 29), random);
+                actual.setColorSpace(QColorSpace::SRgb);
+                const uchar* storage = actual.constBits();
+                const QImage source = actual.copy();
+                QTransform rotation;
+                rotation.rotate(180);
+                const QImage expected = source.transformed(rotation).mirrored(horizontal, vertical);
+                Licasa::ImageEditParameters edit;
+                edit.quarterTurns = 2;
+                edit.flipHorizontal = horizontal;
+                edit.flipVertical = vertical;
+                QVERIFY(Licasa::applyImageEdits(actual, edit));
+                QCOMPARE(actual.constBits(), storage);
+                QImage expectedTagged = expected;
+                if (!expectedTagged.colorSpace().isValid()) {
+                    expectedTagged.setColorSpace(QColorSpace::SRgb);
+                }
+                QCOMPARE(actual, expectedTagged);
+                QCOMPARE(actual.colorSpace(), expectedTagged.colorSpace());
+                QCOMPARE(actual.offset(), expected.offset());
+            }
+        }
     }
 
     void mirrorReusesOwnedRasterAndPreservesSharedSource()

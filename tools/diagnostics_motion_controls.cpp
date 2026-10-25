@@ -3,6 +3,7 @@
 #include "media/motion/motion_photo_session.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QMouseEvent>

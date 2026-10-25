@@ -7,10 +7,11 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
+
+from display_session_results import parse_display_graphics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,12 +28,23 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="licasa-arch-verify-") as temporary:
         work = Path(temporary)
         shutil.copy2(package, work / "licasa.pkg.tar.zst")
+        shutil.copy2(ROOT / "packaging/install-licasa-appimage.sh", work / "check-runtime.sh")
         (work / "Dockerfile").write_text(
             "FROM archlinux:latest\n"
             "COPY licasa.pkg.tar.zst /tmp/licasa.pkg.tar.zst\n"
-            "RUN pacman -Syu --noconfirm --needed desktop-file-utils xdg-utils "
-            "xorg-server-xvfb xorg-xwininfo weston mesa "
+            "COPY check-runtime.sh /opt/check-runtime.sh\n"
+            "RUN pacman -Syu --noconfirm "
             "&& pacman -U --noconfirm /tmp/licasa.pkg.tar.zst\n"
+            "RUN bash -ec '. /opt/check-runtime.sh; licasa_check_runtime_dependencies "
+            "/opt/licasa/usr/lib/licasa/lib:/opt/licasa/usr/lib /opt/licasa/usr'\n"
+            "RUN pacman -U --noconfirm /tmp/licasa.pkg.tar.zst "
+            "&& pacman -R --noconfirm licasa-appimage "
+            "&& test ! -e /opt/licasa && test ! -e /usr/bin/licasa "
+            "&& test ! -e /usr/share/applications/licasa.desktop "
+            "&& test ! -e /usr/share/icons/hicolor/512x512/apps/licasa.png "
+            "&& pacman -U --noconfirm /tmp/licasa.pkg.tar.zst\n"
+            "RUN pacman -Syu --noconfirm --needed desktop-file-utils xdg-utils "
+            "xorg-server-xvfb xorg-xwininfo weston\n"
             "USER 65534:65534\n"
         )
         tag = "licasa-arch-package-verify:local"
@@ -65,20 +77,14 @@ def main() -> None:
             if result.returncode:
                 raise RuntimeError(f"Arch package {name} failed:\n"
                                    f"{result.stdout}\n{result.stderr}")
-            graphics = re.search(r"graphicsApi=([A-Za-z0-9]+)", result.stdout)
-            fallback = re.search(r"diagnostic_fallback=(true|false); app_retry=(true|false)",
-                                 result.stdout)
-            if not graphics or not fallback:
-                raise RuntimeError(f"Arch package {name} has incomplete results:\n"
-                                   f"{result.stdout}")
-            displays[name] = {"graphics_api": graphics.group(1),
-                              "diagnostic_fallback": fallback.group(1) == "true",
-                              "app_retry": fallback.group(2) == "true"}
+            displays[name] = parse_display_graphics(result.stdout, context=f"Arch package {name}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
         "distribution": "archlinux",
         "package_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
         "clean_install": True,
+        "runtime_checked_before_desktop_tools": True,
+        "package_reinstall_and_removal_checked": True,
         "desktop_valid": True,
         "jpeg_default_selected": True,
         "viewer_launched": True,

@@ -121,6 +121,7 @@ int main(int argc, char** argv)
     Licasa::ImageResourcePolicy::initializeDecoderEnvironment();
     Licasa::configureSurfaceFormatForRequestedOpenGL();
     QGuiApplication application(argc, argv);
+    Licasa::configureSurfaceFormatForPlatform(QGuiApplication::platformName());
     Licasa::initializeImagePlugins();
     application.setOrganizationName(QStringLiteral("LicasaDiagnostics"));
     application.setApplicationName(QStringLiteral("LicasaDiagnostics"));

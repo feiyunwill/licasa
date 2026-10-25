@@ -158,6 +158,8 @@ static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
         return {};
     }
 
+    const int sourceStep = int(width) / previewSize.width();
+    const quint64 sourceRemainder = width % quint64(previewSize.width());
     int previewY = 0;
     for (png_uint_32 y = 0; y < height; ++y) {
         if (cancelled && cancelled->load(std::memory_order_relaxed)) {
@@ -170,9 +172,17 @@ static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
                quint64(previewY) * height / quint64(previewSize.height()) == y) {
             const auto* source = reinterpret_cast<const QRgb*>(decodedRow);
             auto* output = reinterpret_cast<QRgb*>(result.preview.scanLine(previewY));
+            int sourceX = 0;
+            quint64 samplingRemainder = 0;
             for (int x = 0; x < previewSize.width(); ++x) {
-                const int sourceX = int(quint64(x) * width / quint64(previewSize.width()));
                 output[x] = source[sourceX];
+                // Advance the exact floor mapping without dividing every sample.
+                sourceX += sourceStep;
+                samplingRemainder += sourceRemainder;
+                if (samplingRemainder >= quint64(previewSize.width())) {
+                    ++sourceX;
+                    samplingRemainder -= quint64(previewSize.width());
+                }
             }
             ++previewY;
         }

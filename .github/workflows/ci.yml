@@ -86,7 +86,7 @@ jobs:
             build/codecs/prefix
             build/deps/qt-backport-runtime
           # No fallback keys: release/ASan/UBSan and ABI revisions stay separate.
-          key: native-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'cmake/strip_codec_rpath.cmake', '.github/workflows/ci.yml') }}
+          key: native-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', '.github/workflows/ci.yml') }}
       - name: Cache compiler outputs
         uses: actions/cache@v5
         with:

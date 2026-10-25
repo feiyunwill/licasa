@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QColorSpace>
+#include <QCoreApplication>
 #include <QDebug>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
@@ -109,6 +110,41 @@ void configureSurfaceFormatForRequestedOpenGL()
     format.setAlphaBufferSize(8);
     format.setColorSpace(QColorSpace::SRgb);
     QSurfaceFormat::setDefaultFormat(format);
+}
+
+void configureSurfaceFormatForPlatform(const QString& platformName)
+{
+#if defined(Q_OS_LINUX)
+    if (platformName != QStringLiteral("wayland") &&
+        !platformName.startsWith(QStringLiteral("wayland-"))) {
+        return;
+    }
+    // Keep explicit graphics choices intact. Only the automatic Wayland path
+    // needs this preference; X11 and other rendering backends use their defaults.
+    if (!qgetenv("QT_QUICK_BACKEND").trimmed().isEmpty() ||
+        !qgetenv("QSG_RHI_BACKEND").trimmed().isEmpty() ||
+        !qgetenv("QT_OPENGL").trimmed().isEmpty() ||
+        QCoreApplication::testAttribute(Qt::AA_UseDesktopOpenGL) ||
+        QCoreApplication::testAttribute(Qt::AA_UseSoftwareOpenGL) ||
+        QCoreApplication::testAttribute(Qt::AA_UseOpenGLES)) {
+        return;
+    }
+    QSurfaceFormat format = QSurfaceFormat::defaultFormat();
+    if (format.renderableType() != QSurfaceFormat::DefaultRenderableType ||
+        format.profile() != QSurfaceFormat::NoProfile) {
+        return;
+    }
+    // Qt 6.4's default desktop-GL path can initialize successfully yet paint a
+    // black window with NVIDIA's Wayland EGL driver. GLES renders correctly in
+    // the same runtime/device. Select it before creating any Quick windows,
+    // after Qt has identified the actual platform, without forcing a Qt backend.
+    format.setRenderableType(QSurfaceFormat::OpenGLES);
+    format.setVersion(3, 0);
+    QSurfaceFormat::setDefaultFormat(format);
+    qInfo().noquote() << "[Licasa] Using OpenGL ES for automatic Wayland rendering";
+#else
+    Q_UNUSED(platformName);
+#endif
 }
 
 void logWindowGraphicsBackend(QQuickWindow* window, const QString& stage)

@@ -7,10 +7,11 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
+
+from display_session_results import parse_display_graphics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,15 +124,7 @@ def main() -> None:
                 if display.returncode:
                     raise RuntimeError(f"Ubuntu .deb {name} failed:\n"
                                        f"{display.stdout}\n{display.stderr}")
-                graphics = re.search(r"graphicsApi=([A-Za-z0-9]+)", display.stdout)
-                fallback = re.search(r"diagnostic_fallback=(true|false); app_retry=(true|false)",
-                                     display.stdout)
-                if not graphics or not fallback:
-                    raise RuntimeError(f"Ubuntu .deb {name} has incomplete results:\n"
-                                       f"{display.stdout}")
-                displays[name] = {"graphics_api": graphics.group(1),
-                                  "diagnostic_fallback": fallback.group(1) == "true",
-                                  "app_retry": fallback.group(2) == "true"}
+                displays[name] = parse_display_graphics(display.stdout, context=f"Ubuntu .deb {name}")
         report["display_sessions"] = displays
         report["runtime_dependencies_checked_before_desktop_tools"] = True
         report["package_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()

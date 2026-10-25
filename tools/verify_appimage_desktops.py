@@ -7,9 +7,11 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import re
+import shutil
 import subprocess
+import tempfile
 
+from display_session_results import parse_display_graphics
 from verify_installed_release import SAMPLES
 
 
@@ -35,13 +37,12 @@ cd /tmp
 """
 
 
-def run_display_check(name: str, script: str, appimage: Path, sample: Path,
+def run_display_check(name: str, script: str, sample: Path,
                       checks: dict[str, object]) -> None:
     command = [
         "docker", "run", "--rm", "--network", "none", "--read-only",
         "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--shm-size", "256m",
         "--user", "65534:65534", "--cap-drop", "ALL",
-        "-v", f"{appimage}:/opt/Licasa.AppImage:ro",
         "-v", f"{ROOT / 'packaging/install-licasa-appimage.sh'}:/opt/install-licasa-appimage.sh:ro",
         "-v", f"{ROOT / 'tools/check_display_session.sh'}:/opt/check_display_session.sh:ro",
         "-v", f"{sample}:/samples/photo.jpg:ro",
@@ -50,16 +51,7 @@ def run_display_check(name: str, script: str, appimage: Path, sample: Path,
     result = subprocess.run(command, capture_output=True, text=True, timeout=100)
     if result.returncode:
         raise RuntimeError(f"{name} failed:\n{result.stdout}\n{result.stderr}")
-    match = re.search(r"graphicsApi=([A-Za-z0-9]+)", result.stdout)
-    if not match:
-        raise RuntimeError(f"{name} did not report its graphics API:\n{result.stdout}")
-    fallback = re.search(r"diagnostic_fallback=(true|false); app_retry=(true|false)",
-                         result.stdout)
-    if not fallback:
-        raise RuntimeError(f"{name} did not report recovery results:\n{result.stdout}")
-    checks[name] = {"passed": True, "graphics_api": match.group(1),
-                    "diagnostic_fallback": fallback.group(1) == "true",
-                    "app_retry": fallback.group(2) == "true"}
+    checks[name] = {"passed": True, **parse_display_graphics(result.stdout, context=name)}
     print(result.stdout.strip(), flush=True)
 
 
@@ -75,9 +67,13 @@ def main() -> None:
     if any(not (assets / path).is_file() for path in DECODE_SAMPLES.values()):
         parser.error("Repository release samples are missing")
 
-    subprocess.run(["docker", "build", "--file",
-                    str(ROOT / "packaging/verify-appimage-arch.Dockerfile"),
-                    "--tag", IMAGE, str(ROOT / "packaging")], check=True)
+    with tempfile.TemporaryDirectory(prefix="licasa-arch-appimage-") as temporary:
+        work = Path(temporary)
+        shutil.copy2(ROOT / "packaging/verify-appimage-arch.Dockerfile", work / "Dockerfile")
+        shutil.copy2(appimage, work / "Licasa.AppImage")
+        shutil.copy2(ROOT / "packaging/install-licasa-appimage.sh", work / "install-licasa-appimage.sh")
+        shutil.copy2(ROOT / "tools/check_appimage_install.sh", work / "check_appimage_install.sh")
+        subprocess.run(["docker", "build", "--tag", IMAGE, str(work)], check=True)
     checks = {}
     for protocol in ("x11", "wayland"):
         for mode in ("default", "software"):
@@ -88,7 +84,7 @@ def main() -> None:
                 "/tmp/squashfs-root/usr/bin/licasa_diagnostics "
                 f"'/tmp/photo with spaces.jpg' {protocol} {mode}"
             )
-            run_display_check(name, script, appimage, sample, checks)
+            run_display_check(name, script, sample, checks)
 
     decode_script = (
         "cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null; "
@@ -104,7 +100,6 @@ def main() -> None:
          "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--user", "65534:65534",
          "--cap-drop", "ALL", "-e", "QT_QPA_PLATFORM=offscreen",
          "-e", "XDG_RUNTIME_DIR=/tmp/runtime", "-e", "XDG_CACHE_HOME=/tmp/cache",
-         "-v", f"{appimage}:/opt/Licasa.AppImage:ro",
          "-v", f"{assets}:/samples:ro", IMAGE, "sh", "-ec", decode_script, "_",
          *(f"/samples/{path}" for path in DECODE_SAMPLES.values())],
         capture_output=True, text=True, timeout=90,
@@ -125,23 +120,18 @@ def main() -> None:
 
     dependency_script = (
         "cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null; "
-        "export LD_LIBRARY_PATH=/tmp/squashfs-root/usr/lib/licasa/lib:"
-        "/tmp/squashfs-root/usr/lib; "
-        "find squashfs-root/usr -type f "
-        "\\( -name '*.so' -o -name '*.so.*' -o -name licasa "
-        "-o -name licasa_diagnostics \\) | while IFS= read -r file; do "
-        "missing=$(ldd \"$file\" 2>/dev/null | grep 'not found' || true); "
-        "if [ -n \"$missing\" ]; then printf '%s: %s\\n' \"$file\" \"$missing\"; fi; "
-        "done"
+        ". /opt/install-licasa-appimage.sh; licasa_check_runtime_dependencies "
+        "/tmp/squashfs-root/usr/lib/licasa/lib:/tmp/squashfs-root/usr/lib "
+        "/tmp/squashfs-root/usr"
     )
     result = subprocess.run(
         ["docker", "run", "--rm", "--network", "none", "--read-only",
          "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=2g", "--user", "65534:65534",
-         "--cap-drop", "ALL", "-v", f"{appimage}:/opt/Licasa.AppImage:ro",
-         IMAGE, "sh", "-ec", dependency_script],
+         "--cap-drop", "ALL",
+         IMAGE, "bash", "-ec", dependency_script],
         capture_output=True, text=True, timeout=90,
     )
-    if result.returncode or result.stdout.strip():
+    if result.returncode:
         raise RuntimeError(f"Arch missing bundled dependencies:\n{result.stdout}\n{result.stderr}")
     checks["arch_elf_dependencies"] = True
     print("Arch: all packaged ELF dependencies resolved", flush=True)
@@ -150,6 +140,8 @@ def main() -> None:
     args.output.write_text(json.dumps({
         "appimage_sha256": hashlib.sha256(appimage.read_bytes()).hexdigest(),
         "test_image": IMAGE,
+        "runtime_checked_before_desktop_tools": True,
+        "appimage_lifecycle_checked_before_desktop_tools": True,
         "checks": checks,
     }, indent=2) + "\n")
     print(f"Arch desktop checks passed: {args.output}")

@@ -138,7 +138,10 @@ XmpProbeResult jpegStandardXmp(const QString& path, const std::atomic_bool* canc
 {
     XmpProbeResult result;
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Unbuffered)) {
+    // QFile's bounded read buffer amortizes the one- and two-byte JPEG marker
+    // reads. Payload admission and seeks below still enforce the metadata scan
+    // and segment limits; buffering never decodes or retains an image raster.
+    if (!file.open(QIODevice::ReadOnly)) {
         result.error = QStringLiteral("Unable to open JPEG for bounded metadata probing");
         return result;
     }
@@ -208,20 +211,45 @@ XmpProbeResult jpegStandardXmp(const QString& path, const std::atomic_bool* canc
         }
 
         if (marker == 0xe1 && payloadLength >= quint64(standardXmpSignatureSize)) {
-            QByteArray payload(qsizetype(payloadLength), Qt::Uninitialized);
-            if (!readExact(&file, payload.data(), payload.size(), cancelFlag)) {
+            char signature[standardXmpSignatureSize];
+            if (!readExact(&file, signature, standardXmpSignatureSize, cancelFlag)) {
                 if (!cancelled(cancelFlag)) {
                     result.error = QStringLiteral("JPEG APP1 XMP segment is truncated");
                 }
                 return result;
             }
-            scanned += payloadLength;
-            if (payload.size() >= standardXmpSignatureSize &&
-                std::equal(standardXmpSignature, standardXmpSignature + standardXmpSignatureSize,
-                           payload.constData())) {
-                result.packet = payload.mid(standardXmpSignatureSize);
+            const quint64 remainingPayload = payloadLength - quint64(standardXmpSignatureSize);
+            if (std::equal(standardXmpSignature, standardXmpSignature + standardXmpSignatureSize,
+                           signature)) {
+                QByteArray packet(qsizetype(remainingPayload), Qt::Uninitialized);
+                if (!readExact(&file, packet.data(), packet.size(), cancelFlag)) {
+                    if (!cancelled(cancelFlag)) {
+                        result.error = QStringLiteral("JPEG APP1 XMP segment is truncated");
+                    }
+                    return result;
+                }
+                result.packet = std::move(packet);
                 return result;
             }
+            if (cancelled(cancelFlag)) {
+                return result;
+            }
+            // EXIF and vendor APP1 blocks need only their signature inspected.
+            // Validate the complete declared payload before skipping it, keeping
+            // the APP1-specific truncation diagnostic used by the read path.
+            const qint64 currentPosition = file.pos();
+            const qint64 currentSize = file.size();
+            const auto target =
+                currentPosition >= 0
+                    ? checkedByteOffsetAdd(quint64(currentPosition), remainingPayload)
+                    : std::nullopt;
+            if (!target || currentSize < 0 || *target > quint64(currentSize) ||
+                *target > quint64(std::numeric_limits<qint64>::max()) ||
+                !file.seek(qint64(*target))) {
+                result.error = QStringLiteral("JPEG APP1 XMP segment is truncated");
+                return result;
+            }
+            scanned += payloadLength;
             continue;
         }
 

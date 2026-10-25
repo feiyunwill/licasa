@@ -1,6 +1,7 @@
 #include "media/live_photo_pairing.h"
 
 #include <QByteArray>
+#include <QByteArrayView>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -70,7 +71,7 @@ struct TextProbe {
 
 enum class ByteOrder { Little, Big };
 
-std::optional<quint16> read16(const QByteArray& bytes, quint64 offset, ByteOrder order)
+std::optional<quint16> read16(QByteArrayView bytes, quint64 offset, ByteOrder order)
 {
     if (offset > quint64(bytes.size()) || quint64(bytes.size()) - offset < 2) {
         return std::nullopt;
@@ -80,7 +81,7 @@ std::optional<quint16> read16(const QByteArray& bytes, quint64 offset, ByteOrder
                                    : qFromLittleEndian<quint16>(data);
 }
 
-std::optional<quint32> read32(const QByteArray& bytes, quint64 offset, ByteOrder order)
+std::optional<quint32> read32(QByteArrayView bytes, quint64 offset, ByteOrder order)
 {
     if (offset > quint64(bytes.size()) || quint64(bytes.size()) - offset < 4) {
         return std::nullopt;
@@ -110,8 +111,8 @@ quint64 tiffTypeSize(quint16 type)
     }
 }
 
-std::optional<QByteArray> fieldBytes(const QByteArray& storage, quint64 entryOffset, quint16 type,
-                                     quint32 count, ByteOrder order, quint64 offsetBase)
+std::optional<QByteArrayView> fieldBytes(QByteArrayView storage, quint64 entryOffset, quint16 type,
+                                         quint32 count, ByteOrder order, quint64 offsetBase)
 {
     const quint64 unit = tiffTypeSize(type);
     if (unit == 0 || count == 0 || quint64(count) > maximumJpegMetadataBytes / unit) {
@@ -135,12 +136,12 @@ std::optional<QByteArray> fieldBytes(const QByteArray& storage, quint64 entryOff
         byteCount > quint64(std::numeric_limits<qsizetype>::max())) {
         return std::nullopt;
     }
-    return storage.mid(qsizetype(valueOffset), qsizetype(byteCount));
+    return storage.sliced(qsizetype(valueOffset), qsizetype(byteCount));
 }
 
-std::optional<QByteArray> findIfdField(const QByteArray& storage, quint64 ifdOffset,
-                                       quint16 wantedTag, ByteOrder order, quint64 offsetBase,
-                                       quint16* foundType = nullptr)
+std::optional<QByteArrayView> findIfdField(QByteArrayView storage, quint64 ifdOffset,
+                                           quint16 wantedTag, ByteOrder order, quint64 offsetBase,
+                                           quint16* foundType = nullptr)
 {
     const auto count = read16(storage, ifdOffset, order);
     if (!count || *count > maximumTiffEntries) {
@@ -169,20 +170,20 @@ std::optional<QByteArray> findIfdField(const QByteArray& storage, quint64 ifdOff
         }
         return fieldBytes(storage, entry, *type, *itemCount, order, offsetBase);
     }
-    return QByteArray{};
+    return QByteArrayView{};
 }
 
-TextProbe appleIdentifierFromMakerNote(const QByteArray& maker)
+TextProbe appleIdentifierFromMakerNote(QByteArrayView maker)
 {
     TextProbe result;
-    if (maker.size() < 16 || !maker.startsWith(QByteArray(appleSignature, 10))) {
+    if (maker.size() < 16 || !maker.startsWith(QByteArrayView(appleSignature, 10))) {
         return result;
     }
 
     ByteOrder order;
-    if (maker.mid(12, 2) == QByteArrayLiteral("MM")) {
+    if (maker.sliced(12, 2) == QByteArrayLiteral("MM")) {
         order = ByteOrder::Big;
-    } else if (maker.mid(12, 2) == QByteArrayLiteral("II")) {
+    } else if (maker.sliced(12, 2) == QByteArrayLiteral("II")) {
         order = ByteOrder::Little;
     } else {
         result.state = TextProbe::State::Invalid;
@@ -231,7 +232,7 @@ TextProbe appleIdentifierFromMakerNote(const QByteArray& maker)
             result.error = QStringLiteral("Apple content identifier exceeds the MakerNote block");
             return result;
         }
-        QByteArray value = *valueBytes;
+        QByteArrayView value = *valueBytes;
         while (!value.isEmpty() && value.endsWith('\0')) {
             value.chop(1);
         }
@@ -246,13 +247,13 @@ TextProbe appleIdentifierFromMakerNote(const QByteArray& maker)
             return result;
         }
         result.state = TextProbe::State::Found;
-        result.value = QString::fromLatin1(value);
+        result.value = QString::fromLatin1(value.data(), value.size());
         return result;
     }
     return result;
 }
 
-TextProbe appleIdentifierFromExif(const QByteArray& exif)
+TextProbe appleIdentifierFromExif(QByteArrayView exif)
 {
     TextProbe result;
     if (exif.size() < 8) {
@@ -412,7 +413,7 @@ TextProbe jpegAppleIdentifier(const QString& path, const std::atomic_bool* cance
                 return result;
             }
             if (payload.startsWith(QByteArray(exifSignature, 6))) {
-                return appleIdentifierFromExif(payload.mid(6));
+                return appleIdentifierFromExif(QByteArrayView(payload).sliced(6));
             }
         }
         position += payloadLength;
@@ -665,7 +666,10 @@ TextProbe movieContentIdentifier(const QString& path, const std::atomic_bool* ca
 {
     TextProbe result;
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Unbuffered)) {
+    // Box headers and key entries are small neighboring reads. QFile's bounded
+    // read buffer amortizes them; readExactAt still checks cancellation and the
+    // parser's checked box ranges, and identity is pinned before/after parsing.
+    if (!file.open(QIODevice::ReadOnly)) {
         result.state = TextProbe::State::Invalid;
         result.error = QStringLiteral("Unable to open paired MOV candidate");
         return result;
@@ -821,9 +825,7 @@ std::optional<QString> sameBasenameMovie(const QFileInfo& still)
     return std::nullopt;
 }
 
-} // namespace
-
-AppleLivePhotoIdentifierDetection appleLivePhotoIdentifierFromExifTiff(const QByteArray& tiff)
+AppleLivePhotoIdentifierDetection identifierDetectionFromExif(QByteArrayView tiff)
 {
     const TextProbe probe = appleIdentifierFromExif(tiff);
     AppleLivePhotoIdentifierDetection result;
@@ -835,6 +837,13 @@ AppleLivePhotoIdentifierDetection appleLivePhotoIdentifierFromExifTiff(const QBy
         result.error = probe.error;
     }
     return result;
+}
+
+} // namespace
+
+AppleLivePhotoIdentifierDetection appleLivePhotoIdentifierFromExifTiff(const QByteArray& tiff)
+{
+    return identifierDetectionFromExif(tiff);
 }
 
 AppleLivePhotoIdentifierDetection
@@ -859,7 +868,7 @@ appleLivePhotoIdentifierFromHeifExifBlock(const QByteArray& metadataBlock)
         result.error = QStringLiteral("HEIF Exif TIFF offset exceeds its metadata block");
         return result;
     }
-    return appleLivePhotoIdentifierFromExifTiff(metadataBlock.mid(qsizetype(tiffOffset)));
+    return identifierDetectionFromExif(QByteArrayView(metadataBlock).sliced(qsizetype(tiffOffset)));
 }
 
 bool hasAppleLivePhotoMovieCandidate(const QString& stillPath)

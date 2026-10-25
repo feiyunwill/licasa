@@ -45,9 +45,16 @@ jobs:
           fi
       - name: Check installer regressions before building
         run: |
-          python3 -B tests/test_appimage_installer.py -v
-          python3 -B tests/test_appimage_packaging.py -v
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pil python3-gi gir1.2-glib-2.0 patchelf gcc
+          /usr/bin/python3 -B tests/test_appimage_installer.py -v
+          /usr/bin/python3 -B tests/test_appimage_packaging.py -v
+          /usr/bin/python3 -B tests/test_package_qualification.py -v
+          /usr/bin/python3 -B tests/test_installation_qualification.py -v
+          /usr/bin/python3 -B tests/test_graphics_qualification.py -v
+          /usr/bin/python3 -B tests/test_physical_graphics_qualification.py -v
           bash -n packaging/install-licasa-appimage.sh
+          bash -n tools/check_appimage_install.sh
 
   verify_sanitizers:
     needs: preflight
@@ -86,7 +93,7 @@ jobs:
             build/release-dependencies/codecs
             build/release-dependencies/quick
             build/release-dependencies/ffmpeg
-          key: ubuntu-release-deps-v2-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'tools/build_ubuntu_deb.py', 'cmake/strip_codec_rpath.cmake', 'packaging/verify-fresh-build.sh') }}
+          key: ubuntu-release-deps-v2-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'tools/build_ubuntu_deb.py', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', 'packaging/verify-fresh-build.sh') }}
       - name: Build and test from a clean Ubuntu 24.04 image
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
@@ -268,7 +275,7 @@ jobs:
         run: |
           sudo snap set system experimental.user-daemons=false
           sudo snap install --channel=edge licasa
-          for attempt in $(seq 1 10); do
+          for ((attempt = 1; attempt <= 10; attempt++)); do
             installed_version="$(snap list licasa | awk 'NR == 2 {print $2}')"
             source_file=/snap/licasa/current/usr/share/licasa/source-commit
             if [ "$installed_version" = "$VERSION" ] &&

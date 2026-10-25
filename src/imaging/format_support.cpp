@@ -1,4 +1,5 @@
 #include "imaging/format_support.h"
+#include <QCollator>
 #include <QDebug>
 #include <QDir>
 #include <QDirIterator>
@@ -10,6 +11,7 @@
 #include <QSet>
 #include <algorithm>
 #include <utility>
+#include <vector>
 
 namespace Licasa {
 namespace {
@@ -19,23 +21,58 @@ bool lessFileName(const QString& left, const QString& right)
     return comparison < 0 || (comparison == 0 && left < right);
 }
 
+void sortImageNames(QStringList& names, const std::atomic<quint64>* generation,
+                    quint64 expectedGeneration)
+{
+    const QCollator collator;
+    // The C locale has no reusable collation keys. Small directories also do
+    // too little comparison work to repay allocating one key per name.
+    if (names.size() < 64 || collator.locale().language() == QLocale::C) {
+        std::sort(names.begin(), names.end(), lessFileName);
+        return;
+    }
+
+    struct KeyedName {
+        QString name;
+        QCollatorSortKey key;
+    };
+    std::vector<KeyedName> keyed;
+    keyed.reserve(size_t(names.size()));
+    for (const QString& name : std::as_const(names)) {
+        if (generation && generation->load(std::memory_order_relaxed) != expectedGeneration) {
+            names.clear();
+            return;
+        }
+        keyed.push_back({name, collator.sortKey(name)});
+    }
+    std::sort(keyed.begin(), keyed.end(), [](const KeyedName& left, const KeyedName& right) {
+        const int comparison = left.key.compare(right.key);
+        return comparison < 0 || (comparison == 0 && left.name < right.name);
+    });
+    for (qsizetype index = 0; index < names.size(); ++index) {
+        names[index] = std::move(keyed[size_t(index)].name);
+    }
+}
+
 QStringList scanImageNames(const QString& directory, const QSet<QString>& extensions,
                            const std::atomic<quint64>* generation = nullptr,
                            quint64 expectedGeneration = 0)
 {
     QStringList names;
-    QDirIterator entries(directory, QDir::Files | QDir::Readable | QDir::NoDotAndDotDot);
+    QDirIterator entries(directory, QDir::Files | QDir::NoDotAndDotDot);
     while (entries.hasNext()) {
         if (generation && generation->load(std::memory_order_relaxed) != expectedGeneration) {
             return {};
         }
         entries.next();
         const QFileInfo entry = entries.fileInfo();
-        if (extensions.contains(entry.suffix().toLower())) {
+        // Only supported candidates need a readability stat. Mixed folders can
+        // contain many unrelated files; checking them cannot admit a photo.
+        if (extensions.contains(entry.suffix().toLower()) && entry.isReadable()) {
             names.append(entry.fileName());
         }
     }
-    std::sort(names.begin(), names.end(), lessFileName);
+    sortImageNames(names, generation, expectedGeneration);
     return names;
 }
 } // namespace
@@ -277,30 +314,30 @@ QList<QUrl> FormatSupport::nearbyImagesImpl(const QUrl& current, int radius, int
     }
     const QStringList& indexed = imagesInDirectory(directory);
     const QString currentName = currentFile.fileName();
-    QStringList additional;
-    const QStringList* names = &indexed;
-    auto currentIt = std::lower_bound(indexed.cbegin(), indexed.cend(), currentName, lessFileName);
-    if (currentIt == indexed.cend() || *currentIt != currentName) {
+    const auto currentIt =
+        std::lower_bound(indexed.cbegin(), indexed.cend(), currentName, lessFileName);
+    const bool currentIndexed = currentIt != indexed.cend() && *currentIt == currentName;
+    if (!currentIndexed) {
         if (!canOpen(current)) {
             return {};
         }
-        additional = indexed;
-        additional.insert(int(currentIt - indexed.cbegin()), currentName);
-        names = &additional;
-        currentIt = names->cbegin() + (currentIt - indexed.cbegin());
     }
 
-    const int count = names->size();
+    // An extensionless or mislabeled current photo belongs at this sorted
+    // position, but choosing a few neighbors need not copy the entire index.
+    const qsizetype index = currentIt - indexed.cbegin();
+    const qsizetype count = indexed.size() + (currentIndexed ? 0 : 1);
     if (count < 2) {
         return {};
     }
-    const int index = int(currentIt - names->cbegin());
     QList<QUrl> nearby;
-    nearby.reserve(int(std::min<qint64>(count - 1, qint64(radius) * 2)));
+    nearby.reserve(std::min<qint64>(count - 1, qint64(radius) * 2));
     const auto appendNeighbor = [&](int distance, int direction) {
-        const int neighbor =
+        const qsizetype neighbor =
             direction > 0 ? (index + distance) % count : (index - distance + count) % count;
-        const QUrl url = QUrl::fromLocalFile(QDir(directory).absoluteFilePath(names->at(neighbor)));
+        const qsizetype storedIndex = neighbor - (!currentIndexed && neighbor > index ? 1 : 0);
+        const QUrl url =
+            QUrl::fromLocalFile(QDir(directory).absoluteFilePath(indexed.at(storedIndex)));
         if (!nearby.contains(url)) {
             nearby.append(url);
         }

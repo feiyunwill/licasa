@@ -13,6 +13,12 @@ set(LICASA_RAW_TEST_TARGETS)
 set(LICASA_AVIF_TEST_TARGETS)
 set(LICASA_APNG_TEST_TARGETS)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME licasa_offline_source_tests
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_offline_sources.py")
+set_tests_properties(licasa_offline_source_tests PROPERTIES
+        TIMEOUT 30 LABELS "packaging;offline;fast")
+
 add_executable(licasa_runtime_error_log_tests
         tests/tst_runtime_error_log.cpp src/app/runtime_error_log.cpp)
 target_include_directories(licasa_runtime_error_log_tests PRIVATE src)
@@ -23,6 +29,17 @@ list(APPEND LICASA_CORE_TEST_TARGETS licasa_runtime_error_log_tests)
 add_test(NAME licasa_runtime_error_log_tests COMMAND licasa_runtime_error_log_tests)
 set_tests_properties(licasa_runtime_error_log_tests PROPERTIES
         TIMEOUT 15 LABELS "core;logging;fast")
+
+add_executable(licasa_graphics_backend_tests
+        tests/tst_graphics_backend.cpp src/platform/graphics_backend.cpp)
+target_include_directories(licasa_graphics_backend_tests PRIVATE src)
+target_link_libraries(licasa_graphics_backend_tests PRIVATE Qt6::Quick Qt6::Test)
+licasa_enable_warnings(licasa_graphics_backend_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_graphics_backend_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_graphics_backend_tests)
+add_test(NAME licasa_graphics_backend_tests COMMAND licasa_graphics_backend_tests)
+set_tests_properties(licasa_graphics_backend_tests PROPERTIES
+        TIMEOUT 15 LABELS "core;startup;graphics;fast")
 
 add_executable(licasa_background_mode_tests
         tests/tst_background_mode.cpp
@@ -490,6 +507,74 @@ set_tests_properties(licasa_async_image_provider_tests PROPERTIES
         TIMEOUT 15 LABELS "core;async;lifecycle;fast")
 
 add_executable(licasa_image_edit_pipeline_tests tests/tst_image_edit_pipeline.cpp)
+if(LICASA_HAVE_FAST_TIFF_PREVIEW)
+    add_executable(licasa_preview_runtime_tests tests/tst_preview_runtime.cpp)
+    target_link_libraries(licasa_preview_runtime_tests PRIVATE
+            licasa_image_services Qt6::Test TIFF::TIFF)
+    licasa_enable_warnings(licasa_preview_runtime_tests)
+    list(APPEND LICASA_TEST_TARGETS licasa_preview_runtime_tests)
+    add_test(NAME licasa_preview_runtime_tests COMMAND licasa_preview_runtime_tests)
+    set_tests_properties(licasa_preview_runtime_tests PROPERTIES
+            TIMEOUT 60 LABELS "codec;preview;security")
+endif()
+
+add_executable(licasa_runtime_edit_round2_tests tests/tst_runtime_edit_round2.cpp)
+target_link_libraries(licasa_runtime_edit_round2_tests PRIVATE licasa_image_services Qt6::Test)
+licasa_enable_warnings(licasa_runtime_edit_round2_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_runtime_edit_round2_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_runtime_edit_round2_tests)
+add_test(NAME licasa_runtime_edit_round2_tests COMMAND licasa_runtime_edit_round2_tests)
+set_tests_properties(licasa_runtime_edit_round2_tests PROPERTIES
+        TIMEOUT 120 LABELS "core;editing")
+
+add_executable(licasa_runtime_edit_round3_tests tests/tst_runtime_edit_round3.cpp)
+target_link_libraries(licasa_runtime_edit_round3_tests PRIVATE licasa_image_services Qt6::Test)
+licasa_enable_warnings(licasa_runtime_edit_round3_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_runtime_edit_round3_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_runtime_edit_round3_tests)
+add_test(NAME licasa_runtime_edit_round3_tests COMMAND licasa_runtime_edit_round3_tests)
+set_tests_properties(licasa_runtime_edit_round3_tests PROPERTIES
+        TIMEOUT 120 LABELS "core;editing")
+
+add_executable(licasa_metadata_round3_tests tests/tst_metadata_round3.cpp
+        src/media/android_motion_photo.cpp src/media/live_photo_pairing.cpp
+        src/media/photo_asset_probe.cpp src/io/byte_range_device.cpp
+        src/imaging/format_support.cpp)
+target_include_directories(licasa_metadata_round3_tests PRIVATE src)
+target_link_libraries(licasa_metadata_round3_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+licasa_enable_warnings(licasa_metadata_round3_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_metadata_round3_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_metadata_round3_tests)
+add_test(NAME licasa_metadata_round3_tests COMMAND licasa_metadata_round3_tests)
+set_tests_properties(licasa_metadata_round3_tests PROPERTIES
+        TIMEOUT 60 LABELS "core;metadata;navigation;security")
+
+if(LICASA_HAVE_FAST_PNG_PREVIEW AND LICASA_ENABLE_APNG AND LICASA_ENABLE_QOI)
+    add_executable(licasa_decode_round3_tests tests/tst_decode_round3.cpp
+            src/plugins/apng_handler.cpp)
+    target_include_directories(licasa_decode_round3_tests PRIVATE src)
+    target_link_libraries(licasa_decode_round3_tests PRIVATE
+            licasa_image_services PNG::PNG Qt6::Test)
+    add_dependencies(licasa_decode_round3_tests licasa_qoi_plugin)
+    licasa_enable_warnings(licasa_decode_round3_tests)
+    list(APPEND LICASA_TEST_TARGETS licasa_decode_round3_tests)
+    add_test(NAME licasa_decode_round3_tests COMMAND licasa_decode_round3_tests)
+    set_tests_properties(licasa_decode_round3_tests PROPERTIES
+            TIMEOUT 90 LABELS "codec;preview;animation;security"
+            ENVIRONMENT "QT_PLUGIN_PATH=${CMAKE_CURRENT_BINARY_DIR}/plugins")
+endif()
+
+add_executable(licasa_navigation_runtime_tests
+        tests/tst_navigation_runtime.cpp src/imaging/format_support.cpp)
+target_include_directories(licasa_navigation_runtime_tests PRIVATE src)
+target_link_libraries(licasa_navigation_runtime_tests PRIVATE Qt6::Gui Qt6::Test)
+licasa_enable_warnings(licasa_navigation_runtime_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_navigation_runtime_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_navigation_runtime_tests)
+add_test(NAME licasa_navigation_runtime_tests COMMAND licasa_navigation_runtime_tests)
+set_tests_properties(licasa_navigation_runtime_tests PROPERTIES
+        TIMEOUT 30 LABELS "core;navigation;fast")
+
 add_executable(licasa_gpu_image_edit_tests tests/tst_gpu_image_edits.cpp)
 target_link_libraries(licasa_gpu_image_edit_tests PRIVATE licasa_image_services Qt6::Test)
 licasa_enable_warnings(licasa_gpu_image_edit_tests)
@@ -509,6 +594,28 @@ list(APPEND LICASA_CORE_TEST_TARGETS licasa_image_edit_pipeline_tests)
 add_test(NAME licasa_image_edit_pipeline_tests COMMAND licasa_image_edit_pipeline_tests)
 set_tests_properties(licasa_image_edit_pipeline_tests PROPERTIES
         TIMEOUT 30 LABELS "core;editing;fast")
+
+add_executable(licasa_sharpen_runtime_tests tests/tst_sharpen_runtime.cpp)
+target_link_libraries(licasa_sharpen_runtime_tests PRIVATE licasa_image_services Qt6::Test)
+licasa_enable_warnings(licasa_sharpen_runtime_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_sharpen_runtime_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_sharpen_runtime_tests)
+add_test(NAME licasa_sharpen_runtime_tests COMMAND licasa_sharpen_runtime_tests)
+set_tests_properties(licasa_sharpen_runtime_tests PROPERTIES
+        TIMEOUT 120 LABELS "core;editing")
+
+if(LICASA_ENABLE_QOI)
+    add_executable(licasa_qoi_runtime_tests tests/tst_qoi_runtime.cpp)
+    target_include_directories(licasa_qoi_runtime_tests PRIVATE src)
+    target_link_libraries(licasa_qoi_runtime_tests PRIVATE Qt6::Gui Qt6::Test)
+    add_dependencies(licasa_qoi_runtime_tests licasa_qoi_plugin)
+    licasa_enable_warnings(licasa_qoi_runtime_tests)
+    list(APPEND LICASA_TEST_TARGETS licasa_qoi_runtime_tests)
+    add_test(NAME licasa_qoi_runtime_tests COMMAND licasa_qoi_runtime_tests)
+    set_tests_properties(licasa_qoi_runtime_tests PROPERTIES
+            TIMEOUT 30 LABELS "imaging;security"
+            ENVIRONMENT "QT_PLUGIN_PATH=${CMAKE_CURRENT_BINARY_DIR}/plugins")
+endif()
 
 add_executable(licasa_image_save_tests
         tests/tst_image_save_service.cpp

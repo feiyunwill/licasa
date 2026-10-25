@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a private Qt 6.4.2 FFmpeg plugin for Ubuntu 24.04; no system installation.
+"""Build the pinned private FFmpeg plugin for the matching Qt 6.4.2 runtime.
 
 Needs Qt private headers, ShaderTools, PulseAudio and FFmpeg development packages.
 Only the plugin is staged: the installed Qt Multimedia library stays in use.
@@ -12,31 +12,9 @@ from pathlib import Path
 import shutil
 import subprocess
 import tarfile
-from urllib.request import urlopen
+from source_cache import add_source_arguments, fetch_archive
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def fetch(work, url, digest):
-    archive = work / "downloads" / url.rsplit("/", 1)[1]
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    if not archive.exists():
-        partial = archive.with_suffix(".partial")
-        try:
-            with urlopen(url, timeout=60) as response, partial.open("wb") as output:
-                total = 0
-                while block := response.read(1024 * 1024):
-                    total += len(block)
-                    if total > 64 * 1024 * 1024:
-                        raise RuntimeError("Source archive exceeded the download bound")
-                    output.write(block)
-            partial.replace(archive)
-        finally:
-            partial.unlink(missing_ok=True)
-    with archive.open("rb") as data:
-        if hashlib.file_digest(data, "sha256").hexdigest() != digest:
-            raise RuntimeError(f"Source checksum mismatch: {archive}")
-    return archive
 
 
 def apply(source, patch):
@@ -50,7 +28,10 @@ def apply(source, patch):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_source_arguments(parser)
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build/deps")
+    parser.add_argument("--build-dir", type=Path,
+                        help="Optional existing build tree for this exact pinned source")
     parser.add_argument("--qt-prefix", type=Path)
     parser.add_argument("--development-prefix", type=Path,
                         help="Unpacked FFmpeg/PulseAudio headers and shared-library links")
@@ -75,21 +56,31 @@ def main():
     work = args.work_dir.resolve()
     lock = ROOT / "packaging/qt-ffmpeg.lock.json"
     spec = json.loads(lock.read_text())
-    archive = fetch(work, spec["url"], spec["sha256"])
+    downloads = args.source_cache.resolve() / "archives" if args.source_cache else work / "downloads"
+    archive = fetch_archive(downloads, spec["url"], spec["sha256"], offline=args.offline,
+                            limit=64 * 1024 * 1024)
+    work.mkdir(parents=True, exist_ok=True)
     source = work / f"qtmultimedia-everywhere-src-{spec['version']}"
     if not source.exists():
         with tarfile.open(archive) as bundle:
             bundle.extractall(work, filter="data")
+    patches = []
     distro = work / "qt-multimedia-debian"
     distro.mkdir(exist_ok=True)
-    distro_archive = fetch(work, spec["ubuntu_patch_url"], spec["ubuntu_patch_sha256"])
+    distro_archive = fetch_archive(downloads, spec["ubuntu_patch_url"],
+                                   spec["ubuntu_patch_sha256"], offline=args.offline,
+                                   limit=64 * 1024 * 1024)
     with tarfile.open(distro_archive) as bundle:
         bundle.extractall(distro, filter="data")
-    patches = [distro / spec["ubuntu_abi_patch"], *[ROOT / p for p in spec["patches"]]]
+    patches.append(distro / spec["ubuntu_abi_patch"])
+    patches.extend(ROOT / p for p in spec["patches"])
+    if args.prepare_only:
+        print(f"Verified Qt Multimedia sources: {work}")
+        return
     for patch in patches:
         apply(source, patch)
     variant = args.sanitizer or "release"
-    build = work / f"qt-ffmpeg-build-{variant}"
+    build = args.build_dir.resolve() if args.build_dir else work / f"qt-ffmpeg-build-{variant}"
     runtime = work / f"qt-ffmpeg-runtime-{variant}"
     flags = "-fstack-protector-strong"
     linker = "-Wl,-z,relro,-z,now,-z,noexecstack"
@@ -143,6 +134,10 @@ def main():
         shutil.copy2(patch, licenses / patch.name)
     (runtime / "build.json").write_text(json.dumps({
         "variant": variant, "plugin_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+        "qt_version": spec["version"], "runtime_profile": "ubuntu-6.4.2",
+        "source_sha256": spec["sha256"],
+        "patches": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest()
+                    for p in spec["patches"]},
         "bytes": output.stat().st_size, "configure": command,
     }, indent=2) + "\n")
     print(f"Private FFmpeg runtime ({variant}): {output}")

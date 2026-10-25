@@ -1,0 +1,37 @@
+From: Licasa qualification maintainers
+Subject: [PATCH] gl-renderer: respect output origin during asynchronous capture
+
+Surfaceless outputs have a positive y_flip and synchronous readback preserves
+their row order. The asynchronous SHM path must make the same decision. Without
+ANGLE_pack_reverse_row_order it currently reverses every output, including
+headless FBOs, in copy_capture(). Pass the output state to the task constructor
+and reverse only when the output needs it. This patches the test compositor,
+not Licasa or the exported PNG.
+
+--- a/libweston/renderer-gl/gl-renderer.c
++++ b/libweston/renderer-gl/gl-renderer.c
+@@ -1100,6 +1100,7 @@
+ static struct gl_capture_task*
+ create_capture_task(struct weston_capture_task *task,
+ 		    struct gl_renderer *gr,
++		    struct gl_output_state *go,
+ 		    const struct weston_geometry *rect)
+ {
+ 	struct gl_capture_task *gl_task = xzalloc(sizeof *gl_task);
+@@ -1111,6 +1112,7 @@
+ 	gl_task->stride = (gr->compositor->read_format->bpp / 8) * rect->width;
+ 	gl_task->height = rect->height;
+ 	gl_task->reverse =
++		is_y_flipped(go) &&
+ 		!gl_extensions_has(gr, EXTENSION_ANGLE_PACK_REVERSE_ROW_ORDER);
+ 	gl_task->sync = EGL_NO_SYNC_KHR;
+ 	gl_task->fd = EGL_NO_NATIVE_FENCE_FD_ANDROID;
+@@ -1219,7 +1221,7 @@
+ 	    is_y_flipped(go))
+ 		glPixelStorei(GL_PACK_REVERSE_ROW_ORDER_ANGLE, GL_TRUE);
+ 
+-	gl_task = create_capture_task(task, gr, rect);
++	gl_task = create_capture_task(task, gr, go, rect);
+ 
+ 	glBindBuffer(GL_PIXEL_PACK_BUFFER, gl_task->pbo);
+ 	glBufferData(GL_PIXEL_PACK_BUFFER, gl_task->stride * gl_task->height,

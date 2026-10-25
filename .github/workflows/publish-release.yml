@@ -171,7 +171,7 @@ jobs:
         run: |
           sudo snap set system experimental.user-daemons=false
           sudo snap install --channel=stable licasa
-          for attempt in $(seq 1 10); do
+          for ((attempt = 1; attempt <= 10; attempt++)); do
             if [ "$(snap list licasa | awk 'NR == 2 {print $3}')" = "$REVISION" ]; then
               break
             fi

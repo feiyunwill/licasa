@@ -166,7 +166,9 @@ qint64 ByteRangeDevice::readData(char* data, qint64 maximumSize)
         return -1;
     }
     const qint64 sourcePosition = validatedOffset_ + logicalPosition;
-    if (!source_.seek(sourcePosition)) {
+    // The QFile is private to this range. Sequential callers already leave it
+    // at the next requested byte; seeking there again only adds a system call.
+    if (source_.pos() != sourcePosition && !source_.seek(sourcePosition)) {
         fail(source_.errorString());
         return -1;
     }
@@ -200,15 +202,16 @@ bool ByteRangeDevice::validateCurrentSource(QString* reason) const
         }
         return false;
     }
-    const qint64 signedSize = source_.size();
-    if (signedSize < 0 || validatedOffset_ < 0 || validatedLength_ < 0 ||
-        !checkedByteRange(quint64(signedSize), quint64(validatedOffset_),
-                          quint64(validatedLength_))) {
+    const auto rangeFits = [this](quint64 size) {
+        return validatedOffset_ >= 0 && validatedLength_ >= 0 &&
+               checkedByteRange(size, quint64(validatedOffset_), quint64(validatedLength_));
+    };
+    const auto truncated = [reason]() {
         if (reason) {
             *reason = QStringLiteral("Source file was truncated below the byte range");
         }
         return false;
-    }
+    };
     if (expectedIdentity_) {
         QString identityReason;
         const auto current = externalFileIdentity(source_, &identityReason);
@@ -218,12 +221,22 @@ bool ByteRangeDevice::validateCurrentSource(QString* reason) const
             }
             return false;
         }
+        // The mandatory fresh identity already contains the descriptor's
+        // current size. Reusing it avoids a second filesystem query per read.
+        if (!rangeFits(current->size)) {
+            return truncated();
+        }
         if (*current != *expectedIdentity_) {
             if (reason) {
                 *reason = QStringLiteral(
                     "External video file changed after Live Photo pairing validation");
             }
             return false;
+        }
+    } else {
+        const qint64 signedSize = source_.size();
+        if (signedSize < 0 || !rangeFits(quint64(signedSize))) {
+            return truncated();
         }
     }
     return true;

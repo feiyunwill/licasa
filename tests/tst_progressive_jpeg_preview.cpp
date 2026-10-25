@@ -3,6 +3,8 @@
 #include <QColorSpace>
 #include <QFile>
 #include <QImageReader>
+#include <QImageWriter>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -21,6 +23,32 @@ class ProgressiveJpegPreviewTest final : public QObject {
     Q_OBJECT
 
   private slots:
+    void alignedRasterRespectsAllocationLimit()
+    {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const QString path = temporary.filePath(QStringLiteral("odd-width.jpg"));
+        QImage source(QSize(513, 681), QImage::Format_RGB888);
+        source.fill(QColor(31, 97, 173));
+        QImageWriter writer(path, "jpeg");
+        writer.setProgressiveScanWrite(true);
+        QVERIFY2(writer.write(source), qPrintable(writer.errorString()));
+
+        const int previousLimit = QImageReader::allocationLimit();
+        const auto restoreLimit =
+            qScopeGuard([previousLimit] { QImageReader::setAllocationLimit(previousLimit); });
+        std::atomic_bool cancelled{false};
+        QImageReader::setAllocationLimit(1);
+        QVERIFY(Licasa::readEarlyProgressiveJpegPreview(path, source.size(), 1'000'000, &cancelled)
+                    .isNull());
+        QImageReader::setAllocationLimit(2);
+        const QImage image =
+            Licasa::readEarlyProgressiveJpegPreview(path, source.size(), 1'000'000, &cancelled);
+        QCOMPARE(image.size(), source.size());
+        QCOMPARE(image.bytesPerLine(), qsizetype(1540));
+        QCOMPARE(image.sizeInBytes(), qsizetype(1'048'740));
+    }
+
     void earlyPassProvidesUsableColorPreview()
     {
         std::atomic_bool cancelled = false;

@@ -7,15 +7,19 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
 
+from display_session_results import parse_display_graphics
 from verify_installed_release import SAMPLES
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HOST_RUNTIME_PACKAGES = (
+    "libX11", "libXext", "libxcb", "libxkbcommon", "mesa-libGL", "mesa-libEGL",
+    "libglvnd-opengl", "fontconfig", "harfbuzz", "dbus-libs",
+)
 
 
 def main() -> None:
@@ -33,15 +37,26 @@ def main() -> None:
         shutil.copy2(appimage, work / "Licasa.AppImage")
         shutil.copy2(ROOT / "packaging/install-licasa-appimage.sh",
                      work / "install-licasa-appimage.sh")
+        shutil.copy2(ROOT / "tools/check_appimage_install.sh", work / "check_appimage_install.sh")
         (work / "Dockerfile").write_text(
             "FROM fedora:44\n"
             "RUN dnf install -y --setopt=install_weak_deps=False "
-            "libX11 libXext libxcb mesa-libGL mesa-libEGL libglvnd-opengl "
-            "fontconfig harfbuzz dbus-libs desktop-file-utils xdg-utils "
-            "xorg-x11-server-Xvfb xwininfo weston mesa-dri-drivers "
-            "&& dnf clean all\n"
+            + " ".join(HOST_RUNTIME_PACKAGES) + " && dnf clean all\n"
             "COPY --chmod=755 Licasa.AppImage /opt/Licasa.AppImage\n"
-            "COPY --chmod=755 install-licasa-appimage.sh /opt/install-licasa-appimage.sh\n")
+            "COPY --chmod=755 install-licasa-appimage.sh /opt/install-licasa-appimage.sh\n"
+            "COPY check_appimage_install.sh /opt/check_appimage_install.sh\n"
+            "RUN cd /tmp && /opt/Licasa.AppImage --appimage-extract >/dev/null "
+            "&& bash -ec '. /opt/install-licasa-appimage.sh; "
+            "licasa_check_runtime_dependencies "
+            "/tmp/squashfs-root/usr/lib/licasa/lib:/tmp/squashfs-root/usr/lib "
+            "/tmp/squashfs-root/usr' && rm -rf /tmp/squashfs-root\n"
+            "USER 65534:65534\n"
+            "RUN HOME=/tmp/licasa-install-test bash /opt/check_appimage_install.sh "
+            "/opt/install-licasa-appimage.sh /opt/Licasa.AppImage\n"
+            "USER 0:0\n"
+            "RUN dnf install -y --setopt=install_weak_deps=False "
+            "desktop-file-utils xdg-utils xorg-x11-server-Xvfb xwininfo weston mesa-dri-drivers "
+            "&& dnf clean all\n")
         tag = "licasa-appimage-fedora-verify:local"
         subprocess.run(["docker", "build", "--tag", tag, str(work)], check=True)
         command = (
@@ -97,20 +112,14 @@ def main() -> None:
                 if display.returncode:
                     raise RuntimeError(f"Fedora AppImage {name} failed:\n"
                                        f"{display.stdout}\n{display.stderr}")
-                graphics = re.search(r"graphicsApi=([A-Za-z0-9]+)", display.stdout)
-                fallback = re.search(r"diagnostic_fallback=(true|false); app_retry=(true|false)",
-                                     display.stdout)
-                if not graphics or not fallback:
-                    raise RuntimeError(f"Fedora AppImage {name} has incomplete results:\n"
-                                       f"{display.stdout}")
-                displays[name] = {"graphics_api": graphics.group(1),
-                                  "diagnostic_fallback": fallback.group(1) == "true",
-                                  "app_retry": fallback.group(2) == "true"}
+                displays[name] = parse_display_graphics(display.stdout, context=f"Fedora AppImage {name}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
         "fedora_version": 44,
         "appimage_sha256": hashlib.sha256(appimage.read_bytes()).hexdigest(),
         "fuse_free_install": True,
+        "runtime_checked_before_desktop_tools": True,
+        "appimage_lifecycle_checked_before_desktop_tools": True,
         "desktop_valid": True,
         "jpeg_default_selected": True,
         "viewer_launched": True,

@@ -63,28 +63,45 @@ struct VirtualSegment {
     qint64 sourceOffset = -1;
 };
 
-const std::array<quint32, 256>& crcTable()
+const std::array<std::array<quint32, 256>, 8>& crcTables()
 {
-    static const std::array<quint32, 256> table = [] {
-        std::array<quint32, 256> values{};
-        for (quint32 n = 0; n < values.size(); ++n) {
+    static const std::array<std::array<quint32, 256>, 8> tables = [] {
+        std::array<std::array<quint32, 256>, 8> values{};
+        for (quint32 n = 0; n < values[0].size(); ++n) {
             quint32 c = n;
             for (int bit = 0; bit < 8; ++bit) {
                 c = (c & 1u) ? 0xedb88320u ^ (c >> 1u) : c >> 1u;
             }
-            values[n] = c;
+            values[0][n] = c;
+        }
+        for (size_t slice = 1; slice < values.size(); ++slice) {
+            for (size_t n = 0; n < values[slice].size(); ++n) {
+                const quint32 previous = values[slice - 1][n];
+                values[slice][n] = values[0][previous & 0xffu] ^ (previous >> 8u);
+            }
         }
         return values;
     }();
-    return table;
+    return tables;
 }
 
 quint32 crcUpdate(quint32 crc, const char* data, qint64 length)
 {
-    const auto& table = crcTable();
-    for (qint64 i = 0; i < length; ++i) {
+    const auto& tables = crcTables();
+    qint64 i = 0;
+    // Eight independent lookups remove the byte-at-a-time dependency chain.
+    // Unaligned little-endian loads preserve the PNG polynomial on every host.
+    for (; length - i >= 8; i += 8) {
+        const quint32 first = qFromLittleEndian<quint32>(data + i) ^ crc;
+        const quint32 last = qFromLittleEndian<quint32>(data + i + 4);
+        crc = tables[7][first & 0xffu] ^ tables[6][(first >> 8u) & 0xffu] ^
+              tables[5][(first >> 16u) & 0xffu] ^ tables[4][first >> 24u] ^
+              tables[3][last & 0xffu] ^ tables[2][(last >> 8u) & 0xffu] ^
+              tables[1][(last >> 16u) & 0xffu] ^ tables[0][last >> 24u];
+    }
+    for (; i < length; ++i) {
         const auto byte = static_cast<quint8>(data[i]);
-        crc = table[(crc ^ byte) & 0xffu] ^ (crc >> 8u);
+        crc = tables[0][(crc ^ byte) & 0xffu] ^ (crc >> 8u);
     }
     return crc;
 }
@@ -445,7 +462,7 @@ class ApngHandler final : public QImageIOHandler {
             if (frame.isNull()) {
                 return false;
             }
-            if (!composeFrame(index, frame)) {
+            if (!composeFrame(index, std::move(frame))) {
                 return false;
             }
         }
@@ -981,14 +998,34 @@ class ApngHandler final : public QImageIOHandler {
         return true;
     }
 
-    bool composeFrame(int frameIndex, const QImage& frame)
+    bool composeFrame(int frameIndex, QImage frame)
     {
+        const auto& control = frames_.at(frameIndex);
+        const QRect rect(control.offset, control.size);
+        if (control.blend == BlendOp::Source && control.size == canvasSize_ &&
+            control.offset.isNull() && control.dispose != DisposeOp::Previous) {
+            // A complete source frame replaces every canvas pixel, including
+            // any previous disposal result. Reuse its owning raster instead of
+            // detaching and rewriting the canvas retained by an earlier output.
+            // Previous disposal still uses the ordinary path: it must snapshot
+            // the disposed canvas before this frame replaces it.
+            const QImage::Format format =
+                canvas_.isNull() ? compositionFormat(frame.format()) : canvas_.format();
+            const QColorSpace colorSpace =
+                canvas_.isNull() ? frame.colorSpace() : canvas_.colorSpace();
+            canvas_ = std::move(frame).convertToFormat(format);
+            if (canvas_.isNull()) {
+                return fail(QStringLiteral("APNG canvas allocation failed."));
+            }
+            canvas_.setColorSpace(colorSpace);
+            previousRegion_ = {};
+            previousRect_ = {};
+            composedUntil_ = frameIndex;
+            return true;
+        }
         if (!ensureCanvas(frame) || !applyPreviousDisposal()) {
             return false;
         }
-
-        const auto& control = frames_.at(frameIndex);
-        const QRect rect(control.offset, control.size);
         if (control.dispose == DisposeOp::Previous) {
             previousRegion_ = canvas_.copy(rect);
             previousRect_ = rect;
