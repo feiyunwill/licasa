@@ -25,6 +25,71 @@ import qt_runtime
 
 
 class SnapDialogQualificationTests(unittest.TestCase):
+    def test_activated_desktop_services_receive_the_selected_virtual_display(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            services = root / "dbus-1/services"
+            services.mkdir(parents=True)
+            receipt = root / "environment.json"
+            service = root / "service.py"
+            service.write_text('import json, os\nfrom pathlib import Path\n'
+                'from gi.repository import Gio, GLib\n'
+                'connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)\n'
+                'connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", '
+                '"org.freedesktop.DBus", "RequestName", '
+                'GLib.Variant("(su)", ("org.example.LicasaDisplayTest", 0)), '
+                'None, Gio.DBusCallFlags.NONE, 5000, None)\n'
+                f'Path({str(receipt)!r}).write_text(json.dumps(dict(os.environ)))\n'
+                'loop = GLib.MainLoop()\nGLib.timeout_add(100, loop.quit)\nloop.run()\n')
+            (services / "org.example.LicasaDisplayTest.service").write_text(
+                '[D-BUS Service]\nName=org.example.LicasaDisplayTest\n'
+                f'Exec={sys.executable} {service}\n')
+            probe = root / "probe.py"
+            probe.write_text(
+                'import os, subprocess, sys\n'
+                f'sys.path.insert(0, {str(ROOT / "tools")!r})\n'
+                'from verify_snap_desktop import configure_bus_desktop\n'
+                'environment = dict(os.environ, DISPLAY=":93", XDG_RUNTIME_DIR="/run/user/1001", '
+                'XDG_CURRENT_DESKTOP="KDE", XDG_SESSION_TYPE="wayland")\n'
+                'configure_bus_desktop(environment, "wayland-93")\n'
+                'subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus", '
+                '"--object-path", "/org/freedesktop/DBus", "--method", '
+                '"org.freedesktop.DBus.StartServiceByName", "org.example.LicasaDisplayTest", "0"], '
+                'capture_output=True, timeout=10)\n')
+            environment = dict(os.environ, XDG_DATA_DIRS=str(root))
+            for key in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"):
+                environment.pop(key, None)
+            result = subprocess.run(["dbus-run-session", "--", sys.executable, str(probe)],
+                                    env=environment, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            received = json.loads(receipt.read_text())
+            self.assertEqual(received["DISPLAY"], ":93")
+            self.assertEqual(received["WAYLAND_DISPLAY"], "wayland-93")
+            self.assertEqual(received["QT_QPA_PLATFORM"], "wayland")
+            self.assertEqual(received["XDG_CURRENT_DESKTOP"], "KDE")
+
+    def test_wayland_socket_uses_confined_interface_name_and_rejects_existing_session(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            name = desktop.wayland_socket(runtime)
+            self.assertRegex(name, r"^wayland-[0-9]+$")
+            with socket.socket(socket.AF_UNIX) as compositor:
+                compositor.bind(str(runtime / name))
+                with self.assertRaisesRegex(RuntimeError, "existing Wayland"):
+                    desktop.wayland_socket(runtime)
+            (runtime / name).unlink()
+            (runtime / (name + ".lock")).touch()
+            with self.assertRaisesRegex(RuntimeError, "existing Wayland"):
+                desktop.wayland_socket(runtime)
+
+    def test_all_desktop_workflows_install_the_actual_plasma_shell(self):
+        for name in ("ci.yml", "qualify-candidate.yml", "qualify-packages.yml", "retry-verification.yml"):
+            with self.subTest(workflow=name):
+                workflow = (ROOT / ".github/workflows" / name).read_text()
+                kde = workflow.split('kde) sudo apt-get install', 1)[1].split(';;', 1)[0]
+                self.assertRegex(kde, r"\bplasma-desktop\b")
+                self.assertIn("qtwayland5", kde)
+
     def test_wrapper_preserves_arguments_and_never_executes_snap_binary_directly(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)

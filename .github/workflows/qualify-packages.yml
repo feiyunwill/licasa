@@ -183,7 +183,7 @@ jobs:
           case "$DESKTOP" in
             gnome) sudo apt-get install -y --no-install-recommends gnome-shell ;;
             kde) sudo apt-get install -y --no-install-recommends \
-              kwin-x11 kwin-wayland plasma-workspace plasma-workspace-wayland ;;
+              kwin-x11 kwin-wayland qtwayland5 plasma-desktop plasma-workspace plasma-workspace-wayland ;;
           esac
       - name: Check normal X11 and Wayland Snap launches
         env:

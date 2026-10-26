@@ -161,6 +161,15 @@ def close_snap(app, environment):
                 pass
 
 
+def wayland_socket(runtime):
+    # Snap's wayland interface permits /run/user/<uid>/wayland-[0-9]*.
+    # A custom prefix works unconfined but is denied inside the normal launcher.
+    name = "wayland-93"
+    if (runtime / name).exists() or (runtime / (name + ".lock")).exists():
+        raise RuntimeError("Refusing to reuse an existing Wayland socket or lock")
+    return name
+
+
 def bus_owner(name, environment):
     result = subprocess.run(
         ["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
@@ -169,6 +178,16 @@ def bus_owner(name, environment):
         env=environment, capture_output=True, text=True, timeout=5,
     )
     return result.returncode == 0 and "true" in result.stdout
+
+
+def configure_bus_desktop(environment, socket):
+    # The runner's pre-existing user bus predates our virtual display. Services
+    # activated by Plasma otherwise inherit no DISPLAY and abort in Qt startup.
+    activation = dict(environment, WAYLAND_DISPLAY=socket or "",
+                      QT_QPA_PLATFORM="wayland" if socket else "xcb")
+    subprocess.run(["dbus-update-activation-environment", "DISPLAY", "XDG_RUNTIME_DIR",
+                    "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "QT_QPA_PLATFORM", "WAYLAND_DISPLAY"],
+                   env=activation, check=True, capture_output=True, timeout=10)
 
 
 def screenshot(display, destination):
@@ -271,9 +290,8 @@ def qualify(args):
             processes = []
             session_env = dict(environment)
             session_env["XDG_SESSION_TYPE"] = protocol
-            socket = f"licasa-{args.desktop}-{os.getpid()}"
-            if (runtime / socket).exists():
-                raise RuntimeError("Refusing to reuse an existing Wayland socket")
+            socket = wayland_socket(runtime) if protocol == "wayland" else None
+            configure_bus_desktop(session_env, socket)
             try:
                 if args.desktop == "gnome":
                     command = ["gnome-shell", "--x11"] if protocol == "x11" else [
@@ -321,7 +339,15 @@ def qualify(args):
                                                  "software_retry": "retrying once with the Qt software renderer" in log,
                                                  "normal_snap_launcher": True}
                         print(f"{args.desktop} {case}: normal Snap launch presented the photo", flush=True)
-                    finally:
+                    except BaseException:
+                        # Preserve the launch failure even when --quit also
+                        # fails because the same display connection is denied.
+                        try:
+                            close_snap(app, app_env)
+                        except Exception as error:
+                            (output / f"{case}-cleanup.log").write_text(str(error) + "\n")
+                        raise
+                    else:
                         close_snap(app, app_env)
                     report["dialog_interactions"].append(check_dialog_interactions(
                         output, picture, app_env, protocol=protocol, mode=mode))

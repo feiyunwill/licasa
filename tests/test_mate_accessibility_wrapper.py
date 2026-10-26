@@ -64,6 +64,32 @@ class MateWrapperTests(unittest.TestCase):
             self.assertIn("timed out", cleanup.read_text())
             self.assertEqual(calls[-1][-1], calls[-2][calls[-2].index("--name") + 1])
 
+    def test_downloaded_nonexecutable_candidate_is_copied_without_changing_original(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "package/Licasa.AppImage"
+            package.parent.mkdir()
+            package.write_text('#!/bin/sh\ntest "$1" = --appimage-extract\nprintf extracted\n')
+            package.chmod(0o644)
+            reports = root / "reports"
+            reports.mkdir()
+            work = root / "work"
+            work.mkdir()
+            before = mate.digest(package)
+            setup = mate.SCRIPT.split("Xvfb :93", 1)[0]
+            setup = setup.replace('/package/Licasa.AppImage', str(package))
+            setup = setup.replace('/tmp/Licasa.AppImage', str(work / 'Licasa.AppImage'))
+            setup = setup.replace('/reports/extraction.log', str(reports / 'extraction.log'))
+            setup = setup.replace('cd /tmp', 'cd "' + str(work) + '"')
+            import os
+            subprocess.run(["sh", "-ec", setup], check=True,
+                env=dict(os.environ, HOME=str(root / "home"), XDG_RUNTIME_DIR=str(root / "runtime"),
+                         XDG_CONFIG_HOME=str(root / "config"), XDG_STATE_HOME=str(root / "state"),
+                         XDG_CACHE_HOME=str(root / "cache")))
+            self.assertEqual((reports / "extraction.log").read_text(), "extracted")
+            self.assertEqual(mate.digest(package), before)
+            self.assertEqual(package.stat().st_mode & 0o777, 0o644)
+
 
 if __name__ == "__main__":
     unittest.main()

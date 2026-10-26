@@ -12,6 +12,10 @@ on:
         description: Full source commit required for complete candidate verification
         required: false
         type: string
+      retry_run_id:
+        description: Retry only failed platform checks from this completed verification run
+        required: false
+        type: string
   workflow_call:
     inputs:
       source_ref:
@@ -33,7 +37,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  retry:
+    if: ${{ inputs.retry_run_id != '' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/retry-verification.yml
+    with:
+      build_run_id: ${{ inputs.retry_run_id }}
+
   plan:
+    if: ${{ inputs.retry_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -81,7 +95,7 @@ jobs:
       - name: Check package contracts and qualification regressions
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-pil python3-gi gir1.2-glib-2.0 patchelf gcc clang-format-18
+          sudo apt-get install -y --no-install-recommends python3-pil python3-gi gir1.2-glib-2.0 dbus-daemon libglib2.0-bin patchelf gcc clang-format-18
           python3 tools/check_code_style.py
           python3 tools/check_support_manifest.py
           /usr/bin/python3 -B -m unittest discover -s tests -p 'test_*.py' -v
@@ -390,7 +404,7 @@ jobs:
             libglib2.0-bin x11-utils xdotool imagemagick mesa-utils libgl1-mesa-dri fonts-dejavu-core
           case "$DESKTOP" in
             gnome) sudo apt-get install -y --no-install-recommends gnome-shell ;;
-            kde) sudo apt-get install -y --no-install-recommends kwin-x11 kwin-wayland plasma-workspace plasma-workspace-wayland ;;
+            kde) sudo apt-get install -y --no-install-recommends kwin-x11 kwin-wayland qtwayland5 plasma-desktop plasma-workspace plasma-workspace-wayland ;;
           esac
           (cd build/candidate-packages/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
           sudo snap set system experimental.user-daemons=false
@@ -465,7 +479,7 @@ jobs:
   result:
     name: Required verification complete
     needs: [plan, package_contract, quick, test, ubuntu, debian, wrappers, snap, packages, snap_desktops, attest]
-    if: always()
+    if: ${{ always() && inputs.retry_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

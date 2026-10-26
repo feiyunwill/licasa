@@ -15,7 +15,11 @@ set -eu
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
 chmod 700 "$HOME" "$XDG_RUNTIME_DIR"
 cd /tmp
-/package/Licasa.AppImage --appimage-extract >/reports/extraction.log 2>&1
+# Artifact downloads preserve bytes, but not executable permissions. Keep the
+# mounted candidate immutable and extract an executable copy in disposable /tmp.
+cp /package/Licasa.AppImage /tmp/Licasa.AppImage
+chmod 755 /tmp/Licasa.AppImage
+/tmp/Licasa.AppImage --appimage-extract >/reports/extraction.log 2>&1
 Xvfb :93 -ac -screen 0 1360x900x24 -nolisten tcp >/reports/xvfb.log 2>&1 &
 xvfb_pid=$!
 cleanup() {

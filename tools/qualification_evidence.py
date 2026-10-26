@@ -73,7 +73,11 @@ def check_identity(source_sha: str, build_run_id: str) -> None:
         raise ValueError("Expected a full source SHA and positive build run ID")
 
 
-def ensure_candidate_source(source_sha: str) -> None:
+def ensure_candidate_source(source_sha: str, verification_sha: str | None = None) -> dict | None:
+    if verification_sha:
+        from retry_ci_verification import validate_verifier
+        changed = validate_verifier(source_sha, verification_sha)
+        return {"source_sha": verification_sha, "changed_files": changed}
     actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     if actual != source_sha:
         raise ValueError(f"Qualification tooling must be checked out at candidate {source_sha}, got {actual}")
@@ -332,7 +336,7 @@ def validate_stable_notes(notes: str) -> None:
 def run_target(args: argparse.Namespace) -> None:
     manifest = load_manifest()
     check_identity(args.source_sha, args.build_run_id)
-    ensure_candidate_source(args.source_sha)
+    verification = ensure_candidate_source(args.source_sha, getattr(args, "verification_sha", None))
     target = next((row for row in manifest["targets"] if row["id"] == args.target), None)
     if target is None:
         raise ValueError(f"Unknown target {args.target}")
@@ -360,6 +364,8 @@ def run_target(args: argparse.Namespace) -> None:
               "manifest_sha256": digest(MANIFEST), "artifact": target["artifact"],
               "profile": target["profile"],
               "package_sha256": digest(package), "started_at": utc_now(), "command": command}
+    if verification:
+        record["verification"] = verification
     failure = None
     try:
         with (raw / "qualifier.log").open("w") as log:
@@ -421,6 +427,14 @@ def validate(attestation: dict, manifest: dict, *, source_sha: str, build_run_id
         raise ValueError("Qualification targets are missing, duplicated, or unexpected")
     for target_id, target in targets.items():
         row = outcomes[target_id]
+        if "verification" in row:
+            receipt = row["verification"]
+            from retry_ci_verification import VERIFIER_FILES
+            if (receipt != attestation.get("verification")
+                    or not re.fullmatch(r"[a-f0-9]{40}", receipt.get("source_sha", ""))
+                    or not isinstance(receipt.get("changed_files"), list)
+                    or set(receipt["changed_files"]) - VERIFIER_FILES):
+                raise ValueError(f"{target_id}: invalid separate verifier provenance")
         for key, value in expected.items():
             if row.get(key) != value:
                 raise ValueError(f"{target_id}: stale or mismatched {key}")
@@ -458,11 +472,13 @@ def validate(attestation: dict, manifest: dict, *, source_sha: str, build_run_id
 
 def assemble(args: argparse.Namespace) -> None:
     manifest = load_manifest()
-    ensure_candidate_source(args.source_sha)
+    verification = ensure_candidate_source(args.source_sha, getattr(args, "verification_sha", None))
     attestation = {"schema_version": 1, "source_sha": args.source_sha, "build_run_id": args.build_run_id,
                    "version": args.version, "manifest_sha256": digest(MANIFEST), "created_at": utc_now(),
                    "packages": package_hashes(manifest, args.packages, args.version),
                    "outcomes": [json.loads(path.read_text()) for path in sorted(args.evidence.glob("*/outcome.json"))]}
+    if verification:
+        attestation["verification"] = verification
     # Always preserve failed or incomplete evidence before returning failure.
     write_json(args.evidence / "qualification.json", attestation)
     validate(attestation, manifest, source_sha=args.source_sha, build_run_id=args.build_run_id,
@@ -474,6 +490,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("run-target", "assemble", "check"))
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--verification-sha", help="Separate clean verifier commit; only approved harness files may differ")
     parser.add_argument("--build-run-id", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--packages", type=Path, required=True)

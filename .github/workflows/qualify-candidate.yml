@@ -140,7 +140,7 @@ jobs:
             libglib2.0-bin x11-utils xdotool imagemagick mesa-utils libgl1-mesa-dri fonts-dejavu-core
           case "$DESKTOP" in
             gnome) sudo apt-get install -y --no-install-recommends gnome-shell ;;
-            kde) sudo apt-get install -y --no-install-recommends kwin-x11 kwin-wayland plasma-workspace plasma-workspace-wayland ;;
+            kde) sudo apt-get install -y --no-install-recommends kwin-x11 kwin-wayland qtwayland5 plasma-desktop plasma-workspace plasma-workspace-wayland ;;
           esac
           (cd dist/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
           sudo snap set system experimental.user-daemons=false

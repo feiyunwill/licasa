@@ -318,6 +318,17 @@ class QualificationEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "candidate"):
                 evidence.ensure_candidate_source("a" * 40)
 
+    def test_separate_verifier_provenance_cannot_change_or_escape_its_approved_files(self):
+        receipt = {"source_sha": "b" * 40, "changed_files": ["tools/verify_snap_desktop.py"]}
+        self.attestation["verification"] = receipt
+        self.attestation["outcomes"][0]["verification"] = copy.deepcopy(receipt)
+        self.validate()
+        for changed in ({"source_sha": "c" * 40, "changed_files": receipt["changed_files"]},
+                        {"source_sha": "b" * 40, "changed_files": ["src/main.cpp"]}):
+            self.attestation["outcomes"][0]["verification"] = changed
+            with self.assertRaisesRegex(ValueError, "verifier provenance"):
+                self.validate()
+
     def test_dirty_candidate_checkout_cannot_claim_exact_source_identity(self):
         with patch.object(evidence.subprocess, "check_output", return_value="a" * 40 + "\n"), \
                 patch.object(evidence.subprocess, "run", return_value=SimpleNamespace(returncode=1)):
