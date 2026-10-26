@@ -3,7 +3,8 @@
 
 Requires python3-pyatspi, xdotool, DBus and a running MATE session. This is a
 bounded contract check for names, roles, actions, values and keyboard focus.
-Orca's audible announcements still require a human screen-reader acceptance run.
+Orca's generated utterances can be checked by the container wrapper; listening
+and human screen-reader acceptance still require an audio-enabled desktop.
 """
 from __future__ import annotations
 import argparse
@@ -53,17 +54,26 @@ def main() -> int:
         for candidate in desktop():
             if candidate and "licasa" in candidate.name.lower(): return candidate
         return None
+    def owned_nodes():
+        # GTK's native picker can register a second application root for the
+        # same process, separate from the Qt Quick accessibility root.
+        for candidate in desktop():
+            if not candidate: continue
+            try:
+                if app is not None and candidate.get_process_id() == app.pid:
+                    yield from nodes(candidate)
+            except Exception: continue
     def find(name=None, role=None, showing=True):
-        root = licasa()
-        if root:
-            for candidate in nodes(root):
-                try:
-                    if ((name is None or candidate.name == name) and
-                        (role is None or candidate.getRole() == role) and
-                        (not showing or candidate.getState().contains(pyatspi.STATE_SHOWING))):
-                        return candidate
-                except Exception: continue
+        for candidate in owned_nodes():
+            try:
+                if ((name is None or candidate.name == name) and
+                    (role is None or candidate.getRole() == role) and
+                    (not showing or candidate.getState().contains(pyatspi.STATE_SHOWING))):
+                    return candidate
+            except Exception: continue
         return None
+    def picker():
+        return find(role=pyatspi.ROLE_FILE_CHOOSER) or find(role=pyatspi.ROLE_DIALOG)
     def wait(description, predicate, timeout=12):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -83,25 +93,22 @@ def main() -> int:
                 return
         raise RuntimeError(f"No {wanted} action on {control.name}: {names}")
     def key(keys):
-        windows = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Licasa$"], capture_output=True, text=True, timeout=4)
-        if windows.returncode == 0:
-            subprocess.run(["xdotool", "windowactivate", "--sync", windows.stdout.splitlines()[-1]], check=True, timeout=4)
+        # Keep the active modal chooser focused. Activating its blocked parent
+        # before every key can hang the window manager's activation handshake.
         subprocess.run(["xdotool", "key", "--clearmodifiers", keys], check=True, timeout=4)
         time.sleep(0.12)
     def record(name, detail=""):
         report["scenarios"].append({"name": name, "status": "passed", "detail": detail})
     def snapshot(label):
-        root = licasa()
         result = []
-        if root:
-            for control in nodes(root):
-                try:
-                    state = control.getState()
-                    result.append({"name": control.name, "role": control.getRoleName(),
-                                   "showing": state.contains(pyatspi.STATE_SHOWING),
-                                   "focused": state.contains(pyatspi.STATE_FOCUSED),
-                                   "checked": state.contains(pyatspi.STATE_CHECKED)})
-                except Exception: continue
+        for control in owned_nodes():
+            try:
+                state = control.getState()
+                result.append({"name": control.name, "role": control.getRoleName(),
+                               "showing": state.contains(pyatspi.STATE_SHOWING),
+                               "focused": state.contains(pyatspi.STATE_FOCUSED),
+                               "checked": state.contains(pyatspi.STATE_CHECKED)})
+            except Exception: continue
         snapshots.append({"label": label, "nodes": result})
     try:
         if "MATE" not in report["desktop"].upper():
@@ -119,15 +126,15 @@ def main() -> int:
         # Start with a keyboard action so focus restoration has a precise target.
         opened.queryComponent().grabFocus()
         action(opened, "press")
-        chooser = wait("announced file picker", lambda: find(role=pyatspi.ROLE_DIALOG))
+        chooser = wait("announced file picker", picker)
         record("picker_dialog_role", chooser.name)
         snapshot("open picker")
         key("Escape")
-        wait("picker closes", lambda: find(role=pyatspi.ROLE_DIALOG) is None)
+        wait("picker closes", lambda: picker() is None)
         wait("Open button focus returns", lambda: find("Open image", pyatspi.ROLE_PUSH_BUTTON).getState().contains(pyatspi.STATE_FOCUSED))
         record("cancel_restores_open_button_focus")
         key("ctrl+o")
-        wait("keyboard reopen", lambda: find(role=pyatspi.ROLE_DIALOG))
+        wait("keyboard reopen", picker)
         key("Escape")
         record("keyboard_open_cancel_reopen")
         # Single-instance command routes a real file-open request through the
@@ -143,14 +150,32 @@ def main() -> int:
         wait("checkbox reports changed state", lambda: find("Info overlay", pyatspi.ROLE_CHECK_BOX).getState().contains(pyatspi.STATE_CHECKED) != previous)
         action(find("Info overlay", pyatspi.ROLE_CHECK_BOX), "toggle")
         record("toggle_role_state_action")
+        opacity = wait("settings opacity slider", lambda: find("Background opacity", pyatspi.ROLE_SLIDER))
+        opacity_values = opacity.queryValue()
+        opacity_before = opacity_values.currentValue
+        if (opacity_values.minimumValue != 0 or opacity_values.maximumValue != 100
+                or opacity_values.minimumIncrement != 5 or "percent" not in opacity.description.lower()):
+            raise RuntimeError("Settings slider does not expose readable displayed percent units")
+        action(opacity, "increase" if opacity_before < 100 else "decrease")
+        opacity_after = wait("settings value request", lambda:
+            (value := find("Background opacity", pyatspi.ROLE_SLIDER).queryValue().currentValue)
+            != opacity_before and (True, value))[1]
+        if opacity_after != round(opacity_after):
+            raise RuntimeError("Settings slider leaked a fractional model value")
+        find("Background opacity", pyatspi.ROLE_SLIDER).queryValue().currentValue = opacity_before
+        wait("settings direct value restores preference", lambda:
+             find("Background opacity", pyatspi.ROLE_SLIDER).queryValue().currentValue == opacity_before)
+        record("settings_readable_percent_values", f"{opacity_before} -> {opacity_after} -> {opacity_before}")
         snapshot("settings")
         key("Escape")
         key("e")
         exposure = wait("Exposure slider", lambda: find("Exposure", pyatspi.ROLE_SLIDER))
         values = exposure.queryValue()
         before = values.currentValue
-        if values.minimumValue != -1 or values.maximumValue != 1 or values.minimumIncrement <= 0:
+        if values.minimumValue != -100 or values.maximumValue != 100 or values.minimumIncrement != 2:
             raise RuntimeError("Exposure numeric range or step missing from AT-SPI")
+        if "percent" not in exposure.description.lower():
+            raise RuntimeError("Exposure does not explain its accessible percent units")
         action(exposure, "increase")
         wait("screen-reader slider action updates actual value", lambda: find("Exposure", pyatspi.ROLE_SLIDER).queryValue().currentValue > before)
         record("adjustment_role_range_step_and_action")
@@ -161,13 +186,54 @@ def main() -> int:
         key("Right")
         wait("keyboard adjustment", lambda: find("Exposure", pyatspi.ROLE_SLIDER).queryValue().currentValue > before)
         record("adjustment_keyboard_focus_and_value")
+        # Ten repeated additions of 0.02 reproduce the original binary tail
+        # 0.19999999999999998. Reversing then exercises the other direction.
+        # The interface must report whole displayed percent units,
+        # matching the displayed +10%, without quantizing the edit model.
+        samples = []
+        def slider_sample(label, expected):
+            actual = wait(label, lambda: (value := find("Exposure", pyatspi.ROLE_SLIDER).queryValue().currentValue)
+                          == expected and (True, value))[1]
+            samples.append({"action": label, "value": actual})
+            # Give Orca's event queue a turn before the next intentional action.
+            time.sleep(0.25)
+        key("Home")
+        slider_sample("reset to zero", 0)
+        for _ in range(10): key("Right")
+        slider_sample("ten positive steps", 20)
+        for _ in range(5): key("Left")
+        slider_sample("reverse positive steps", 10)
+        key("Home")
+        for _ in range(10): key("Left")
+        slider_sample("ten negative steps", -20)
+        for _ in range(5): key("Right")
+        slider_sample("reverse negative steps", -10)
+        key("Home")
+        slider_sample("crossing returns to clean zero", 0)
+        for expected in (100, -100):
+            find("Exposure", pyatspi.ROLE_SLIDER).queryValue().currentValue = expected
+            slider_sample("direct accessible endpoint " + str(expected), expected)
+        reset = wait("named adjustment reset", lambda: find("Reset Exposure", pyatspi.ROLE_PUSH_BUTTON))
+        action(reset, "press")
+        slider_sample("accessible reset", 0)
+        wait("reset returns focus to slider", lambda: find("Exposure", pyatspi.ROLE_SLIDER)
+             .getState().contains(pyatspi.STATE_FOCUSED))
+        report["slider_value_samples"] = samples
+        record("adjustment_readable_percent_values_and_reset", "Positive, negative, zero, endpoints and direct value writes.")
+        contrast = wait("second adjustment slider", lambda: find("Contrast", pyatspi.ROLE_SLIDER))
+        contrast.queryComponent().grabFocus()
+        key("Home")
+        key("Right")
+        wait("second adjustment reports displayed units", lambda:
+             find("Contrast", pyatspi.ROLE_SLIDER).queryValue().currentValue == 2)
+        record("second_adjustment_readable_value", "Contrast announces 2 percent after one step.")
         snapshot("editor")
         key("ctrl+shift+s")
-        save_dialog = wait("Save As dialog", lambda: find(role=pyatspi.ROLE_DIALOG))
+        save_dialog = wait("Save As dialog", picker)
         if not save_dialog.name: raise RuntimeError("Save As dialog has no accessible name")
         record("save_as_dialog_name_and_role", save_dialog.name)
         key("Escape")
-        wait("Save As closes", lambda: find(role=pyatspi.ROLE_DIALOG) is None)
+        wait("Save As closes", lambda: picker() is None)
         record("save_as_keyboard_cancel")
         key("c")
         crop = wait("named keyboard crop pane", lambda: find("Crop frame", pyatspi.ROLE_PANEL))

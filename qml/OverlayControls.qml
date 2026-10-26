@@ -51,7 +51,7 @@ Item {
         z: 110
         visible: root.appVisible
         iconName: "close"
-        accessibleName: "Close image"
+        accessibleName: root.hasImage ? "Close image" : "Close Licasa"
         hoverColor: "#B93838"
         pressedColor: "#D73737"
         onClicked: root.closeRequested()

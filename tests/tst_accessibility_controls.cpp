@@ -42,17 +42,20 @@ class AccessibilityControlsTest final : public QObject {
                                          file + ".qml"));
         std::unique_ptr<QObject> control(component.createWithInitialProperties(initial));
         QVERIFY2(control, qPrintable(component.errorString()));
-        auto* accessible = QAccessible::queryAccessibleInterface(control.get());
+        auto* slider = control->findChild<QObject*>(
+            file == "AdjustRow" ? "adjustmentAccessibleSlider" : "settingsAccessibleSlider");
+        // Before the fix the raw model value was exposed on the control itself.
+        auto* accessible = QAccessible::queryAccessibleInterface(slider ? slider : control.get());
         QVERIFY(accessible);
         QCOMPARE(accessible->role(), QAccessible::Slider);
         QVERIFY(!accessible->text(QAccessible::Name).isEmpty());
         QVERIFY(accessible->state().focusable);
         auto* values = accessible->valueInterface();
         QVERIFY(values);
-        QCOMPARE(values->currentValue().toDouble(), 0.25);
-        QCOMPARE(values->minimumValue().toDouble(), -1.0);
-        QCOMPARE(values->maximumValue().toDouble(), 1.0);
-        QCOMPARE(values->minimumStepSize().toDouble(), 0.1);
+        QCOMPARE(values->currentValue().toDouble(), 25.0);
+        QCOMPARE(values->minimumValue().toDouble(), -100.0);
+        QCOMPARE(values->maximumValue().toDouble(), 100.0);
+        QCOMPARE(values->minimumStepSize().toDouble(), 10.0);
         QSignalSpy requested(control.get(), signal.constData());
         QVERIFY(requested.isValid());
         auto* actions = accessible->actionInterface();
@@ -66,6 +69,138 @@ class AccessibilityControlsTest final : public QObject {
         // Screen-reader actions must go through the same production request
         // signal as keyboard/pointer input, preserving the parent's binding.
         QCOMPARE(control->property("value").toDouble(), 0.25);
+        // A direct AT-SPI value write must use the production request signal,
+        // rather than replacing the model binding on the public edit value.
+        values->setCurrentValue(40);
+        QCOMPARE(requested.count(), 3);
+        QCOMPARE(requested.last().first().toDouble(), 0.4);
+        QCOMPARE(control->property("value").toDouble(), 0.25);
+        QCOMPARE(values->currentValue().toDouble(), 25.0);
+        QVERIFY(control->setProperty("value", 0.65));
+        QCOMPARE(values->currentValue().toDouble(), 65.0);
+        QCOMPARE(requested.count(), 3);
+        if (file == "ValueRow") {
+            QVERIFY(control->setProperty("subtitle", "Dark backdrop behind the image"));
+            QCOMPARE(accessible->text(QAccessible::Description),
+                     QString("Dark backdrop behind the image. Value in percent"));
+        }
+    }
+    void readableValues_data()
+    {
+        QTest::addColumn<QString>("file");
+        QTest::addColumn<double>("modelValue");
+        QTest::addColumn<int>("spokenValue");
+        for (const auto& file : {QString("AdjustRow"), QString("ValueRow")}) {
+            for (const auto& value :
+                 {std::pair(0.09999999999999999, 10), std::pair(-0.09999999999999999, -10),
+                  std::pair(0.19999999999999998, 20), std::pair(-0.19999999999999998, -20),
+                  std::pair(6.938893903907228e-18, 0), std::pair(-6.938893903907228e-18, 0),
+                  std::pair(0.123456789, 12), std::pair(-1.0, -100), std::pair(1.0, 100)}) {
+                const auto name = file + '-' + QString::number(value.first, 'g', 17);
+                QTest::newRow(qPrintable(name)) << file << value.first << value.second;
+            }
+        }
+    }
+    void readableValues()
+    {
+        QFETCH(QString, file);
+        QFETCH(double, modelValue);
+        QFETCH(int, spokenValue);
+        QQmlEngine engine;
+        QQmlComponent component(
+            &engine, QUrl::fromLocalFile(QStringLiteral(LICASA_SOURCE_DIR "/qml/components/") +
+                                         file + ".qml"));
+        const auto nameProperty = file == "AdjustRow" ? "label" : "title";
+        std::unique_ptr<QObject> control(component.createWithInitialProperties(
+            {{nameProperty, "Brightness"}, {"value", modelValue}, {"from", -1.0}, {"to", 1.0}}));
+        QVERIFY2(control, qPrintable(component.errorString()));
+        auto* slider = control->findChild<QObject*>(
+            file == "AdjustRow" ? "adjustmentAccessibleSlider" : "settingsAccessibleSlider");
+        QVERIFY(slider);
+        auto* accessible = QAccessible::queryAccessibleInterface(slider);
+        QVERIFY(accessible);
+        QCOMPARE(accessible->valueInterface()->currentValue().toInt(), spokenValue);
+        QCOMPARE(accessible->valueInterface()->currentValue().metaType().id(), QMetaType::Int);
+        QCOMPARE(accessible->text(QAccessible::Description), QString("Value in percent"));
+        // Pointer precision belongs to the edit model, independently of speech.
+        QCOMPARE(control->property("value").toDouble(), modelValue);
+    }
+    void fractionalDisplayUsesWholeNamedUnits()
+    {
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                             LICASA_SOURCE_DIR "/qml/components/ValueRow.qml")));
+        std::unique_ptr<QObject> control(
+            component.createWithInitialProperties({{"title", "Memory cache"},
+                                                   {"subtitle", "Budget for decoded images"},
+                                                   {"value", 8704.0},
+                                                   {"from", 512.0},
+                                                   {"to", 32768.0},
+                                                   {"step", 128.0},
+                                                   {"displayMultiplier", 1.0 / 1024},
+                                                   {"displayDecimals", 2},
+                                                   {"displaySuffix", " GiB"},
+                                                   {"accessibleUnit", "MiB"}}));
+        QVERIFY2(control, qPrintable(component.errorString()));
+        auto* slider = control->findChild<QObject*>("settingsAccessibleSlider");
+        QVERIFY(slider);
+        auto* accessible = QAccessible::queryAccessibleInterface(slider);
+        QCOMPARE(accessible->valueInterface()->currentValue().toDouble(), 8704.0);
+        QCOMPARE(accessible->valueInterface()->minimumStepSize().toDouble(), 128.0);
+        QCOMPARE(accessible->text(QAccessible::Description),
+                 QString("Budget for decoded images. Value in MiB"));
+        auto* valueText = control->findChild<QObject*>("valueRowValue");
+        QVERIFY(valueText);
+        QCOMPARE(valueText->property("text").toString(), QString("8.50 GiB"));
+    }
+    void adjustmentResetIsReachable()
+    {
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                             LICASA_SOURCE_DIR "/qml/components/AdjustRow.qml")));
+        std::unique_ptr<QObject> control(
+            component.createWithInitialProperties({{"label", "Exposure"}, {"value", 0.25}}));
+        QVERIFY2(control, qPrintable(component.errorString()));
+        auto* reset = control->findChild<QQuickItem*>("adjustmentResetButton");
+        QVERIFY(reset);
+        QVERIFY(reset->activeFocusOnTab());
+        auto* accessible = QAccessible::queryAccessibleInterface(reset);
+        QCOMPARE(accessible->role(), QAccessible::Button);
+        QCOMPARE(accessible->text(QAccessible::Name), QString("Reset Exposure"));
+        QSignalSpy requested(control.get(), SIGNAL(valueRequested(double)));
+        accessible->actionInterface()->doAction(QAccessibleActionInterface::pressAction());
+        QCOMPARE(requested.count(), 1);
+        QCOMPARE(requested.last().first().toDouble(), 0.0);
+        QVERIFY(control->setProperty("value", 0.0));
+        QVERIFY(!reset->isVisible());
+    }
+    void timelineUsesWholePercentWithoutChangingSeekPrecision()
+    {
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                             LICASA_SOURCE_DIR "/qml/TemporalControls.qml")));
+        std::unique_ptr<QObject> control(component.createWithInitialProperties(
+            {{"hasTimeline", true}, {"canScrub", true}, {"position", 0.19999999999999998}}));
+        QVERIFY2(control, qPrintable(component.errorString()));
+        QAccessibleInterface* slider = nullptr;
+        for (auto* child : control->findChildren<QQuickItem*>()) {
+            auto* accessible = QAccessible::queryAccessibleInterface(child);
+            if (accessible && accessible->role() == QAccessible::Slider) {
+                slider = accessible;
+                break;
+            }
+        }
+        QVERIFY(slider);
+        QCOMPARE(slider->valueInterface()->currentValue().toInt(), 20);
+        QCOMPARE(slider->valueInterface()->minimumValue().toInt(), 0);
+        QCOMPARE(slider->valueInterface()->maximumValue().toInt(), 100);
+        QCOMPARE(slider->valueInterface()->minimumStepSize().toInt(), 2);
+        QCOMPARE(slider->text(QAccessible::Description), QString("Position in percent"));
+        QSignalSpy requested(control.get(), SIGNAL(seekRequested(double)));
+        slider->actionInterface()->doAction(QAccessibleActionInterface::increaseAction());
+        QCOMPARE(requested.count(), 1);
+        QCOMPARE(requested.first().first().toDouble(), 0.19999999999999998 + 0.02);
+        QCOMPARE(control->property("position").toDouble(), 0.19999999999999998);
     }
     void toggleStateAndAction()
     {

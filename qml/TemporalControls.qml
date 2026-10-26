@@ -238,14 +238,15 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             height: 34
             activeFocusOnTab: root.enabled && root.canScrub
-            readonly property real value: root.clampedPosition
+            readonly property int value: Math.round(root.clampedPosition * 100)
             readonly property real minimumValue: 0
-            readonly property real maximumValue: 1
-            readonly property real stepSize: 0.02
+            readonly property int maximumValue: 100
+            readonly property int stepSize: 2
             Accessible.onIncreaseAction: root.seekRequested(Math.min(1, root.clampedPosition + 0.02))
             Accessible.onDecreaseAction: root.seekRequested(Math.max(0, root.clampedPosition - 0.02))
             Accessible.role: Accessible.Slider
             Accessible.name: "Timeline"
+            Accessible.description: "Position in percent"
             Accessible.focusable: activeFocusOnTab
             Accessible.focused: activeFocus
             Keys.onPressed: function(event) {

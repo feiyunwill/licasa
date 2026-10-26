@@ -22,12 +22,15 @@ REQUIRED_SCENARIOS = {
 
 
 def gtk_picker_identity(*, toolkit: str, role: str, process_id: int, expected_pid: int,
-                        mapped: list[str]) -> dict:
+                        mapped: list[str],
+                        expected_plugin: str = "/usr/lib/x86_64-linux-gnu/qt6/plugins/platformthemes/libqgtk3.so",
+                        gtk_library_root: str | None = None) -> dict:
     """GTK must own the chooser tree, in the same process as the GTK Qt theme."""
-    themes = [path for path in mapped if path.endswith("/qt6/plugins/platformthemes/libqgtk3.so")]
+    themes = [path for path in mapped if path == expected_plugin]
     gtk = [path for path in mapped if "/libgtk-3.so." in path]
     if ("gtk" not in toolkit.lower() or role not in {"file chooser", "dialog"}
-            or process_id != expected_pid or not themes or not gtk):
+            or process_id != expected_pid or not themes or not gtk
+            or (gtk_library_root and any(not Path(path).is_relative_to(gtk_library_root) for path in gtk))):
         raise RuntimeError("The visible chooser is not proven to be the native GTK picker")
     return {"toolkit": toolkit, "role": role, "process_id": process_id,
             "platform_theme_plugin": themes[0], "gtk_libraries": gtk}
@@ -39,6 +42,7 @@ def main() -> int:
     parser.add_argument("--sample", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--bundle-root", type=Path, help="Require GTK and Qt libraries from this extracted AppImage.")
     args = parser.parse_args()
     import pyatspi
     from gi.repository import GLib
@@ -152,19 +156,38 @@ def main() -> int:
             if len(fields) == 6 and fields[-1].startswith("/"):
                 mapped.append(fields[-1])
         identity = gtk_picker_identity(toolkit=chooser.get_toolkit_name(), role=chooser.getRoleName(),
-            process_id=chooser.get_process_id(), expected_pid=app.pid, mapped=sorted(set(mapped)))
+            process_id=chooser.get_process_id(), expected_pid=app.pid, mapped=sorted(set(mapped)),
+            **({"expected_plugin": str(args.bundle_root / "usr/plugins/platformthemes/libqgtk3.so"),
+                "gtk_library_root": str(args.bundle_root / "usr/lib")} if args.bundle_root else {}))
         report["process"] = {"mapped_qt_libraries": sorted({path for path in mapped if "/libQt6" in path})}
+        if args.bundle_root and any(not Path(path).is_relative_to(args.bundle_root)
+                                   for path in report["process"]["mapped_qt_libraries"]):
+            raise RuntimeError("Native AppImage chooser loaded a host Qt library")
         report["native_confirmations"].append(identity)
         snapshot("native GTK chooser")
+        subprocess.run(["import", "-window", "root", str(args.output.with_name(
+            args.output.stem + f".picker-{len(report['native_confirmations'])}.png"))], check=True, timeout=8)
         return chooser
 
-    def enter_path(path, button):
+    def enter_path(path, button, *, overwrite=False):
         key("ctrl+l")
         # GTK Save As can select only the stem, leaving its existing extension.
         # Replace the complete entry so the automation cannot append it twice.
         key("ctrl+a")
-        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "1", str(path)], check=True, timeout=8)
+        # Xvfb's US keymap cannot type every Unicode character through
+        # xdotool. Use GTK's real editable-text interface for the path entry.
+        entry = wait("focused native path entry", lambda: next((node for node in owned_nodes()
+            if showing(node) and node.getRole() == pyatspi.ROLE_TEXT
+            and node.getState().contains(pyatspi.STATE_FOCUSED)
+            and "gtk" in node.get_toolkit_name().lower()), None))
+        if not entry.queryEditableText().setTextContents(str(path)):
+            raise RuntimeError("Native path entry rejected its accessible text input")
         key("Return")
+        if overwrite:
+            replace = wait("native overwrite confirmation", lambda: find("Replace", pyatspi.ROLE_PUSH_BUTTON))
+            snapshot("overwrite confirmation")
+            action(replace)
+            record("native_overwrite_confirmation")
         # GTK sometimes validates the location before enabling the response.
         deadline = time.monotonic() + 3
         while picker() and time.monotonic() < deadline:
@@ -177,6 +200,8 @@ def main() -> int:
 
     try:
         if (os.environ.get("QT_QPA_PLATFORMTHEME") != "gtk3"
+                and not (args.bundle_root and not os.environ.get("QT_QPA_PLATFORMTHEME"))
+                or os.environ.get("XDG_CURRENT_DESKTOP") != "MATE"
                 or os.environ.get("LICASA_VIRTUAL_DESKTOP") != "1"
                 or subprocess.run(["pgrep", "-x", "mate-session"], capture_output=True).returncode):
             raise RuntimeError("Use the disposable MATE qualification container with the matching GTK Qt platform theme")
@@ -193,6 +218,10 @@ def main() -> int:
         confirm_native()
         record("gtk_native_picker_confirmed")
         record("native_open_button")
+        if not any(node.getRole() == pyatspi.ROLE_COMBO_BOX and node.name.strip() == "Images"
+                   for node in owned_nodes() if showing(node)):
+            raise RuntimeError("Native Open picker does not expose its Images filter")
+        record("native_open_filter_accessible")
         before = subprocess.check_output(["xprop", "-id", window, "_NET_WM_STATE"], text=True)
         key("F11")
         if subprocess.check_output(["xprop", "-id", window, "_NET_WM_STATE"], text=True) != before:
@@ -241,6 +270,21 @@ def main() -> int:
                 raise RuntimeError("Native Save As did not preserve the edited photo")
         report["saved_output"] = {"path": str(args.destination), "sha256": hashlib.sha256(args.destination.read_bytes()).hexdigest()}
         record("native_save_output_decodes")
+        if args.bundle_root:
+            previous_digest = hashlib.sha256(args.destination.read_bytes()).hexdigest()
+            exposure = wait("Exposure after save", lambda: find("Exposure", pyatspi.ROLE_SLIDER))
+            before_overwrite = exposure.queryValue().currentValue
+            action(exposure, "increase")
+            wait("edit before overwrite", lambda: find("Exposure", pyatspi.ROLE_SLIDER).queryValue().currentValue > before_overwrite)
+            key("ctrl+shift+s")
+            confirm_native()
+            enter_path(args.destination.absolute(), "Save", overwrite=True)
+            wait("overwritten edited output", lambda: hashlib.sha256(args.destination.read_bytes()).hexdigest() != previous_digest)
+            with Image.open(args.destination) as saved, Image.open(args.sample) as original:
+                saved.load()
+                if saved.size != original.size:
+                    raise RuntimeError("Native overwrite produced an unexpected image")
+            record("native_overwrite_output_decodes", str(args.destination))
         report["status"] = "passed"
         return 0
     except Exception as error:

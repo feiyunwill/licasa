@@ -28,6 +28,7 @@ class AppImagePackagingTests(unittest.TestCase):
         self.libraries = self.work / "qt/lib"
         self.plugins = self.work / "qt/plugins"
         self.qml = self.work / "qt/qml"
+        self.write(self.libraries / packager.GTK_SETTINGS_MODULE)
         for name in ("libQt6WlShellIntegration.so.6", "libQt6WaylandEglClientHwIntegration.so.6",
                      "libSM.so.6", "libICE.so.6", "libuuid.so.1", "libfribidi.so.0",
                      "libgpg-error.so.0", "libcom_err.so.2", "libQt6LabsFolderListModel.so.6"):
@@ -40,6 +41,7 @@ class AppImagePackagingTests(unittest.TestCase):
             for name in plugins:
                 self.write(directory / f"lib{name}.so")
         for name in ("platforms/libqwayland-egl.so", "platforms/libqwayland-generic.so",
+                     "platformthemes/libqgtk3.so",
                      "wayland-decoration-client/decoration.so",
                      "wayland-graphics-integration-client/libqt-plugin-wayland-egl.so",
                      "wayland-shell-integration/libxdg-shell.so"):
@@ -82,6 +84,13 @@ class AppImagePackagingTests(unittest.TestCase):
         elif name == "linuxdeploy-x86_64.AppImage":
             self.deployment_commands.append(command)
             appdir = Path(command[command.index("--appdir") + 1])
+            self.write(appdir / "apprun-hooks/linuxdeploy-plugin-qt-hook.sh",
+                       b"export QT_QPA_PLATFORMTHEME=gtk3\n")
+            self.assertEqual(Path(command[command.index("--deploy-deps-only") + 1]),
+                             appdir / "usr/plugins" / packager.GTK_PLATFORM_THEME)
+            for library in ("libgtk-3.so.0", "libgdk-3.so.0", "libpangoft2-1.0.so.0"):
+                if library != self.omit_library:
+                    self.write(appdir / "usr/lib" / library)
             for plugin in ("libqxcb.so", "libqoffscreen.so", "libqwayland-egl.so", "libqwayland-generic.so"):
                 self.write(appdir / "usr/plugins/platforms" / plugin)
             self.write(appdir / "usr/lib/libQt6Quick.so.6")
@@ -103,6 +112,10 @@ class AppImagePackagingTests(unittest.TestCase):
                         shutil.copy2(source, appdir / "usr/lib" / source.name)
         elif name == "appimagetool-x86_64.AppImage":
             appdir = Path(command[-2])
+            self.assertNotIn("QT_QPA_PLATFORMTHEME=", (appdir / "apprun-hooks/linuxdeploy-plugin-qt-hook.sh").read_text())
+            self.assertIn('GIO_MODULE_DIR="$this_dir/usr/lib/licasa/gio/modules"',
+                          (appdir / "apprun-hooks/linuxdeploy-plugin-qt-hook.sh").read_text())
+            self.assertTrue((appdir / "usr/lib/licasa" / packager.GTK_SETTINGS_MODULE).is_file())
             for library in packager.PORTABLE_RUNTIME_LIBRARIES:
                 self.assertEqual((appdir / "usr/lib" / library).read_bytes(), library.encode())
             quick = appdir / "usr/lib/libQt6Quick.so.6"
@@ -121,6 +134,7 @@ class AppImagePackagingTests(unittest.TestCase):
                 "wayland-decoration-client/decoration.so",
                 "wayland-graphics-integration-client/libqt-plugin-wayland-egl.so",
                 "wayland-shell-integration/libxdg-shell.so",
+                "platformthemes/libqgtk3.so",
             })
             self.assertEqual(set(self.patched_helpers.values()), {"$ORIGIN/../../lib:$ORIGIN"})
             self.assertTrue((appdir / "usr/lib/libQt6WaylandEglClientHwIntegration.so.6").is_file())
@@ -132,7 +146,7 @@ class AppImagePackagingTests(unittest.TestCase):
             self.assertTrue(plugin.is_file())
             self.assertTrue(self.deployment_commands)
             self.assertFalse(self.image_created)
-            if "wayland-" in str(plugin):
+            if "wayland-" in str(plugin) or "platformthemes" in str(plugin):
                 self.patched_helpers["/".join(plugin.parts[-2:])] = command[2]
         else:
             self.fail(f"Unexpected tool request: {command}")
@@ -159,6 +173,41 @@ class AppImagePackagingTests(unittest.TestCase):
             self.assemble()
         self.assertFalse(self.deployment_commands)
         self.assertFalse(self.image_created)
+
+    def test_missing_matching_gtk_theme_stops_before_deployment(self):
+        (self.plugins / packager.GTK_PLATFORM_THEME).unlink()
+        with self.assertRaisesRegex(RuntimeError, "Missing matching Qt GTK platform theme"):
+            self.assemble()
+        self.assertFalse(self.deployment_commands)
+        self.assertFalse(self.image_created)
+
+    def test_deployer_dropping_gtk_dependency_cannot_produce_an_image(self):
+        self.omit_library = "libpangoft2-1.0.so.0"
+        with self.assertRaisesRegex(RuntimeError, "AppDir is missing a GTK runtime library"):
+            self.assemble()
+        self.assertFalse(self.image_created)
+
+    def test_missing_gtk_settings_backend_stops_before_deployment(self):
+        (self.libraries / packager.GTK_SETTINGS_MODULE).unlink()
+        with self.assertRaisesRegex(RuntimeError, "Missing matching GTK settings backend"):
+            self.assemble()
+        self.assertFalse(self.deployment_commands)
+
+    def test_launcher_preserves_explicit_qt_theme_and_isolates_gio_modules(self):
+        appdir = self.work / "AppDir with spaces"
+        hook = appdir / "apprun-hooks/linuxdeploy-plugin-qt-hook.sh"
+        self.write(hook, b"export QT_QPA_PLATFORMTHEME=gtk3\n")
+        packager.preserve_desktop_theme_selection(appdir)
+        environment = dict(os.environ, QT_QPA_PLATFORMTHEME="deliberate-user-fallback",
+                           GIO_MODULE_DIR="/foreign-host/modules", GIO_EXTRA_MODULES="/foreign-host/extra")
+        command = ["bash", "-ec", '. "$1"; printf "%s\\n" "${QT_QPA_PLATFORMTHEME-unset}" "$GIO_MODULE_DIR" "${GIO_EXTRA_MODULES-unset}"',
+                   "_", str(hook)]
+        environment["this_dir"] = str(appdir)
+        result = subprocess.check_output(command, env=environment, text=True)
+        self.assertEqual(result.splitlines(), ["deliberate-user-fallback", str(appdir / "usr/lib/licasa/gio/modules"), "unset"])
+        environment.pop("QT_QPA_PLATFORMTHEME")
+        result = subprocess.check_output(command, env=environment, text=True)
+        self.assertEqual(result.splitlines()[0], "unset")
 
     def test_missing_folderlistmodel_stops_before_deployment(self):
         shutil.rmtree(packager.module_directory(self.qml, "Qt.labs.folderlistmodel"))

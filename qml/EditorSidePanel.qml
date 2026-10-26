@@ -627,10 +627,17 @@ Item {
                         Accessible.role: Accessible.CheckBox
                         Accessible.name: "Compare with original"
                         Accessible.description: "Hold Space or Enter for a temporary comparison"
+                        Accessible.checkable: true
                         Accessible.checked: root.compareOriginal
                         Accessible.focusable: activeFocusOnTab
                         Accessible.focused: activeFocus
                         Accessible.onPressAction: {
+                            if (root.compareOriginal)
+                                root.compareOriginalReleased()
+                            else
+                                root.compareOriginalPressed()
+                        }
+                        Accessible.onToggleAction: {
                             if (root.compareOriginal)
                                 root.compareOriginalReleased()
                             else
