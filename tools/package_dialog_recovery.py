@@ -39,6 +39,9 @@ if {native!r}:
     (root / 'usr/lib/licasa').symlink_to('/usr/lib/licasa', target_is_directory=True)
     shutil.copy2({app!r}, {broken_app!r})
     shutil.copy2({diagnostic!r}, {broken_diagnostic!r})
+    # Keep installed startup assets when relocating the native executables.
+    shutil.copytree(Path({app!r}).parents[1] / 'share/licasa',
+                    root / 'usr/share/licasa', symlinks=True)
     shutil.copytree({qml_root!r}, qml, symlinks=True)
     (root / 'usr/bin/qt.conf').write_text(
         '[Paths]\\nPrefix=..\\nLibraries=/usr/lib/x86_64-linux-gnu\\n'

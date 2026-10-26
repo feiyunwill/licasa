@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QImageReader>
+#include <QJSValue>
 #include <QJsonArray>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -75,6 +76,28 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
     {
         return window_->isActive() && QGuiApplication::focusWindow() == window_;
     }
+    int pickerFailureCount() const
+    {
+        auto* notifications = named("notificationCenter");
+        if (!notifications) {
+            return 0;
+        }
+        QVariant entries = notifications->property("notifications");
+        if (entries.metaType() == QMetaType::fromType<QJSValue>()) {
+            entries = entries.value<QJSValue>().toVariant();
+        }
+        int count = 0;
+        for (const auto& value : entries.toList()) {
+            const auto entry = value.toMap();
+            if (entry.value("operationKey").toString() == QStringLiteral("dialog") &&
+                entry.value("category").toString() == QStringLiteral("error") &&
+                entry.value("title").toString() == QStringLiteral("File picker unavailable") &&
+                !entry.value("ongoing").toBool()) {
+                ++count;
+            }
+        }
+        return count;
+    }
     void record(const QString& name, const QString& detail = QString())
     {
         scenarios_.append(QJsonObject{{"name", name}, {"status", "passed"}, {"detail", detail}});
@@ -102,6 +125,7 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
              {"window_height", window_->height()},
              {"open_button_found", named("emptyStateOpenButton") != nullptr},
              {"open_picker_visible", visible(dialog("openDialogLoader"))},
+             {"picker_failure_count", pickerFailureCount()},
              {"active_focus_name",
               window_->activeFocusItem() ? window_->activeFocusItem()->objectName() : QString()},
              {"focus_window_title",
@@ -216,9 +240,7 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
         case 1: {
             auto* picker = dialog("openDialogLoader");
             if (unavailable_) {
-                auto* notifications = named("notificationCenter");
-                if (!notifications || notifications->property("toastTitle").toString() !=
-                                          QStringLiteral("File picker unavailable")) {
+                if (pickerFailureCount() <= previousPickerFailures_) {
                     return;
                 }
                 if (visible(picker)) {
@@ -389,13 +411,14 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
                 finish("Failed to establish unsaved edits before recovery check");
                 return;
             }
+            // Image/edit completion can replace the transient toast while
+            // input is flushed. Require a fresh retained picker error instead.
+            previousPickerFailures_ = pickerFailureCount();
             key(Qt::Key_S, Qt::ControlModifier | Qt::ShiftModifier);
             ++stage_;
             break;
         case 21: {
-            auto* notifications = named("notificationCenter");
-            if (!notifications || notifications->property("toastTitle").toString() !=
-                                      QStringLiteral("File picker unavailable")) {
+            if (pickerFailureCount() <= previousPickerFailures_) {
                 return;
             }
             if (!imageReady() || !window_->property("editorHasAdjustments").toBool()) {
@@ -403,11 +426,15 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
                 return;
             }
             record("missing_module_preserves_photo_and_edits");
+            previousPickerFailures_ = pickerFailureCount();
             key(Qt::Key_O, Qt::ControlModifier);
             ++stage_;
             break;
         }
         case 22:
+            if (pickerFailureCount() <= previousPickerFailures_) {
+                return;
+            }
             if (visible(dialog("openDialogLoader"))) {
                 finish("Missing module retry opened a picker");
                 return;
@@ -431,6 +458,7 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
     bool finished_ = false;
     int stage_ = 0;
     int lastLoggedStage_ = -1;
+    int previousPickerFailures_ = 0;
     QTimer timer_;
     QElapsedTimer elapsed_;
     QJsonArray scenarios_;
