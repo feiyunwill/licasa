@@ -163,6 +163,8 @@ def installed_check(args, environment: dict | None = None) -> dict:
     output.with_suffix(".stderr.log").write_text(result.stderr)
     if result.returncode:
         raise RuntimeError(f"Installed Motion diagnostic exited {result.returncode}: {result.stderr[-500:]}")
+    if "Attempting to create QWindow-based QOffscreenSurface outside the gui thread" in result.stderr:
+        raise RuntimeError("Installed Motion conversion created a native surface outside the GUI thread")
     controls = json.loads(result.stdout)
     runtime = validate_controls(controls, args.runtime_root, args.qt_version, args.rotation_degrees, version_probe)
     if not frame.is_file() or frame.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":

@@ -190,6 +190,23 @@ def configure_bus_desktop(environment, socket):
                    env=activation, check=True, capture_output=True, timeout=10)
 
 
+def leave_gnome_overview(environment):
+    # A fresh GNOME session starts in Overview. Its window previews can show
+    # the photo while native keyboard focus remains with the shell. Use the
+    # public shell property to enter the desktop before exercising app focus.
+    command = ["gdbus", "call", "--session", "--dest", "org.gnome.Shell",
+               "--object-path", "/org/gnome/Shell", "--method"]
+    subprocess.run([*command, "org.freedesktop.DBus.Properties.Set", "org.gnome.Shell",
+                    "OverviewActive", "<false>"], env=environment, check=True,
+                   capture_output=True, timeout=10)
+    def inactive():
+        result = subprocess.run([*command, "org.freedesktop.DBus.Properties.Get", "org.gnome.Shell",
+                                 "OverviewActive"], env=environment, check=True,
+                                capture_output=True, text=True, timeout=5)
+        return bool(re.search(r"\bfalse\b", result.stdout))
+    wait_until(inactive, "GNOME to leave Overview")
+
+
 def screenshot(display, destination):
     from PIL import Image
 
@@ -315,6 +332,8 @@ def qualify(args):
                     session_env["WAYLAND_DISPLAY"] = socket
                 wait_until(lambda: bus_owner(owner, session_env), "desktop shell", processes)
                 for mode in ("default", "software"):
+                    if args.desktop == "gnome":
+                        leave_gnome_overview(session_env)
                     case = f"{protocol}-{mode}"
                     app_env = dict(session_env, QT_QPA_PLATFORM="xcb" if protocol == "x11" else "wayland")
                     if mode == "software":

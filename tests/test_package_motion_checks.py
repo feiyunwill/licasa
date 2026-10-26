@@ -125,6 +125,21 @@ class PackagedMotionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "different FFmpeg plugin"):
                     checks.installed_check(args, environment=environment)
 
+    def test_thread_unsafe_surface_creation_cannot_pass_with_zero_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = SimpleNamespace(output=root / "report.json", diagnostic=root / "diagnostic",
+                fixture=root / "motion.jpg", runtime_root="/usr", qt_version="6.4.2",
+                mode="software", protocol="wayland", rotation_degrees=0)
+            probe = {"qt_version": "6.4.2", "samples": [{"decoded": True}]}
+            results = [SimpleNamespace(returncode=0, stdout=json.dumps(probe), stderr=""),
+                SimpleNamespace(returncode=0, stdout=json.dumps(self.controls("6.4.2")),
+                    stderr="Attempting to create QWindow-based QOffscreenSurface outside the gui thread. Expect failures.")]
+            with patch.object(checks.subprocess, "run", side_effect=results):
+                with self.assertRaisesRegex(RuntimeError, "outside the GUI thread"):
+                    checks.installed_check(args, environment={})
+            self.assertIn("QOffscreenSurface", (root / "report.stderr.log").read_text())
+
     def test_portable_sonames_require_actual_matching_version_and_library_probes(self):
         controls = self.controls("6.4.2")
         process = controls["process_after_clear"]

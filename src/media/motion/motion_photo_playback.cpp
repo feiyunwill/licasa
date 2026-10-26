@@ -296,6 +296,7 @@ std::optional<MotionPhotoFrameRaster> rasterFromVideoFrame(const QVideoFrame& fr
                                                            quint64 admittedPixels,
                                                            int fallbackRotationDegrees = 0)
 {
+    Q_ASSERT(QThread::currentThread() == QCoreApplication::instance()->thread());
     if (!frame.isValid() || !ImageDecodeContract::allows(frame.size(), admittedPixels)) {
         return std::nullopt;
     }
@@ -343,12 +344,10 @@ struct MotionPhotoPlayback::Session {
     };
 
     struct PendingFrame {
-        QSize size;
+        QVideoFrame frame;
         qint64 timestampUs = -1;
-        std::optional<MotionPhotoFrameRaster> raster;
         quint64 previewRequest = 0;
         bool completesPreview = false;
-        bool conversionFailed = false;
     };
 
     struct FrameHandoff {
@@ -451,6 +450,12 @@ void MotionPhotoPlayback::clear()
         session_->player->stop();
         session_->player->setSource(QUrl());
         session_->player.reset();
+    }
+    {
+        // stop() drains the decoder callbacks. Release their last retained
+        // frame before destroying the sink/device or releasing admission.
+        std::lock_guard<std::mutex> lock(session_->frameHandoff->mutex);
+        session_->frameHandoff->latest.reset();
     }
     session_->sink.reset();
     session_->device.reset();
@@ -686,8 +691,11 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
     // replaceable owned frame waiting for the GUI loop: a newer frame replaces
     // the pending one instead of being dropped. This matters for paused seeks,
     // where Qt can deliver a catch-up keyframe and then the requested frame
-    // before the GUI callback runs. QVideoFrame itself never crosses the
-    // thread/module boundary.
+    // before the GUI callback runs. Convert on the GUI thread: Qt's toImage()
+    // can create a QWindow-backed offscreen surface on Wayland. Creating or
+    // destroying that surface on a decoder thread races the Wayland client.
+    // QVideoFrame stays inside this private backend; only an owned raster
+    // crosses the module boundary, and only one pending frame is retained.
     auto invalidFrame = std::make_shared<std::atomic_bool>(false);
     const auto previewSeek = session_->previewSeek;
     const auto frameHandoff = session_->frameHandoff;
@@ -705,7 +713,6 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                 invalidFrame->store(true);
             }
 
-            const QSize size = frame.size();
             const qint64 timestamp = frame.startTime();
             const qint64 endTimestamp = frame.endTime();
             quint64 previewRequest = 0;
@@ -731,18 +738,9 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                 }
             }
 
-            const std::optional<MotionPhotoFrameRaster> raster =
-                (copyPresentationFrames || completesPreview)
-                    ? rasterFromVideoFrame(frame, admittedPixels, presentationRotationDegrees)
-                    : std::nullopt;
-            const bool conversionFailed =
-                (copyPresentationFrames || completesPreview) && !raster.has_value();
-            const QSize presentationSize = raster ? raster->size : size;
-
             {
                 std::lock_guard<std::mutex> lock(previewSeek->mutex);
-                // Conversion can overlap a new seek or the selection of its
-                // target. An older frame must not overwrite that handoff.
+                // A new seek can supersede this frame before it is queued.
                 if (previewSeek->request != previewRequest ||
                     (previewSeek->completing && !completesPreview)) {
                     return;
@@ -752,10 +750,8 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
             bool queueCallback = false;
             {
                 std::lock_guard<std::mutex> lock(frameHandoff->mutex);
-                frameHandoff->latest = Session::PendingFrame{
-                    presentationSize, timestamp,        raster,
-                    previewRequest,   completesPreview, conversionFailed,
-                };
+                frameHandoff->latest =
+                    Session::PendingFrame{frame, timestamp, previewRequest, completesPreview};
                 if (!frameHandoff->callbackQueued) {
                     frameHandoff->callbackQueued = true;
                     queueCallback = true;
@@ -767,8 +763,8 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
 
             QMetaObject::invokeMethod(
                 this,
-                [this, generation, previewSeek, frameHandoff, invalidFrame,
-                 copyPresentationFrames]() mutable {
+                [this, generation, previewSeek, frameHandoff, invalidFrame, admittedPixels,
+                 presentationRotationDegrees, copyPresentationFrames]() mutable {
                     std::optional<Session::PendingFrame> pending;
                     {
                         std::lock_guard<std::mutex> lock(frameHandoff->mutex);
@@ -784,12 +780,6 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                             "Decoded video frame exceeds the image resource policy."));
                         return;
                     }
-                    if (pending->conversionFailed || (copyPresentationFrames && !pending->raster)) {
-                        fail(QStringLiteral(
-                            "Decoded video frame could not be converted for presentation."));
-                        return;
-                    }
-
                     bool pauseAfterPreview = false;
                     {
                         std::lock_guard<std::mutex> lock(previewSeek->mutex);
@@ -799,6 +789,20 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                         }
                         pauseAfterPreview = pending->completesPreview && previewSeek->completing;
                     }
+                    const bool needsRaster = copyPresentationFrames || pending->completesPreview;
+                    auto raster = needsRaster ? rasterFromVideoFrame(pending->frame, admittedPixels,
+                                                                     presentationRotationDegrees)
+                                              : std::optional<MotionPhotoFrameRaster>{};
+                    const QSize presentationSize = raster ? raster->size : pending->frame.size();
+                    pending->frame = {};
+                    if (generation != generation_ || !session_) {
+                        return;
+                    }
+                    if (needsRaster && !raster) {
+                        fail(QStringLiteral(
+                            "Decoded video frame could not be converted for presentation."));
+                        return;
+                    }
                     if (pauseAfterPreview) {
                         // Keep the selection latch closed until the next user
                         // transport intent. Qt 6.4 can deliver later frames
@@ -806,13 +810,13 @@ void MotionPhotoPlayback::connectFrameSink(quint64 generation)
                         // after its media clock has already been paused.
                         // Share the accepted raster for explicit capture;
                         // QVideoSink's raw frame can still advance underneath.
-                        session_->pausedPreviewFrame = pending->raster;
+                        session_->pausedPreviewFrame = raster;
                     }
 
                     session_->frameSeen = true;
-                    emit frameDecoded(pending->size, pending->timestampUs);
-                    if (pending->raster && frameReadyCallback_) {
-                        frameReadyCallback_(std::move(*pending->raster));
+                    emit frameDecoded(presentationSize, pending->timestampUs);
+                    if (raster && frameReadyCallback_) {
+                        frameReadyCallback_(std::move(*raster));
                     }
 
                     if (pauseAfterPreview && generation == generation_ && session_ &&
