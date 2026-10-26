@@ -27,11 +27,7 @@ Item {
     required property bool windowedTransparencyCheckerboardEnabled
     required property real windowedTransparencyOpacity
     required property bool hasImage
-    // Welcome artwork is UI, never a provider request or an editable photo.
-    property bool welcomeEnabled: true
-    property url welcomeLogoSource: "qrc:/assets/licasa.png"
-    readonly property bool welcomeVisible: emptyState.visible && welcomeEnabled
-        && imageStatus === Image.Null
+    property string imageAccessibleName: ""
 
     required property real imageX
     required property real imageY
@@ -237,7 +233,6 @@ Item {
     signal exitFullscreenToImageRequested()
     signal enterFullscreenRequested()
     signal openDialogRequested()
-    signal settingsRequested()
     signal openUrlRequested(var url)
     signal imageReady()
     signal imageRequestFailed()
@@ -706,6 +701,9 @@ Item {
     Item {
         id: imageStage
         objectName: "imageStage"
+        Accessible.role: Accessible.Graphic
+        Accessible.name: root.imageAccessibleName
+        Accessible.ignored: root.presentationOnly || !root.hasImage
         visible: root.imageStatus === Image.Ready
         x: root.renderedImageX
         y: root.renderedImageY
@@ -1014,12 +1012,12 @@ Item {
         objectName: "emptyImageState"
         anchors.centerIn: parent
         readonly property bool compact: root.width < 320 || root.height < 200
-        visible: !root.presentationOnly && root.imageStatus !== Image.Ready
-            && (root.imageStatus !== Image.Null || root.welcomeEnabled)
+        visible: !root.presentationOnly
+            && (root.imageStatus === Image.Loading || root.imageStatus === Image.Error)
             && root.width >= 180 && root.height >= 110
         z: 20
         width: Math.min(420, Math.max(0, parent.width - 24))
-        height: Math.min(parent.height - 24, root.welcomeVisible ? 340 : compact ? 104 : 176)
+        height: Math.min(parent.height - 24, compact ? 104 : 176)
         radius: 24
         color: Qt.rgba(18 / 255, 20 / 255, 24 / 255, 0.94)
         border.width: 1
@@ -1029,30 +1027,13 @@ Item {
         Column {
             id: emptyStateContent
             anchors.centerIn: parent
-            spacing: root.welcomeVisible || emptyState.compact ? 8 : 14
-
-            Image {
-                id: welcomeLogo
-                objectName: "welcomeLogo"
-                anchors.horizontalCenter: parent.horizontalCenter
-                visible: root.welcomeVisible
-                width: Math.max(16, Math.min(144,
-                    emptyState.height - (emptyState.compact ? 70 : 114)))
-                height: width
-                source: visible ? root.welcomeLogoSource : ""
-                sourceSize.width: Math.ceil(width * root.devicePixelRatio)
-                sourceSize.height: Math.ceil(height * root.devicePixelRatio)
-                fillMode: Image.PreserveAspectFit
-                smooth: true
-                Accessible.ignored: true
-            }
+            spacing: emptyState.compact ? 8 : 14
 
             Text {
                 objectName: "emptyStateTitle"
                 Accessible.role: Accessible.StaticText
                 Accessible.name: text
                 anchors.horizontalCenter: parent.horizontalCenter
-                visible: !root.welcomeVisible || !emptyState.compact
                 color: "#f2f2f2"
                 font.pixelSize: emptyState.compact ? 16 : 20
                 font.weight: Font.DemiBold
@@ -1063,7 +1044,7 @@ Item {
                     : root.imageStatus === Image.Error
                         ? emptyState.compact ? "Open failed"
                                              : "That image could not be opened"
-                        : "Licasa"
+                        : ""
             }
 
             Text {
@@ -1129,18 +1110,6 @@ Item {
             }
         }
 
-        RoundIconButton {
-            objectName: "welcomeSettingsButton"
-            visible: root.welcomeVisible && !root.fullScreenMode
-                && emptyState.width >= 240 && emptyState.height >= 160
-            x: 8
-            y: 8
-            width: 36
-            height: width
-            iconName: "settings"
-            accessibleName: "Open settings"
-            onClicked: root.settingsRequested()
-        }
     }
 
     function normalizedWheelDelta(wheel) {

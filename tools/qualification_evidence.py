@@ -21,19 +21,19 @@ from package_reader_checks import validate_readers
 
 OUTCOMES = {"pass", "fail", "skipped", "unsupported"}
 REQUIRED_DIALOG_SCENARIOS = {
-    "application_launch", "open_button_visible_fallback", "cancel_returns_focus", "picker_blocks_background_shortcuts",
+    "application_launch", "keyboard_open_visible_fallback", "cancel_returns_focus", "picker_blocks_background_shortcuts",
     "ctrl_o_reopens_visible_fallback", "accepted_photo_displayed", "save_as_visible_fallback",
     "save_cancel_creates_no_output", "save_as_output_decodes", "lazy_FrameSaveDialog_visible",
     "lazy_MotionExportDialog_visible", "lazy_AnimationExportDialog_visible",
 }
 REQUIRED_ACCESSIBILITY_SCENARIOS = {
-    "open_button_named_and_actionable", "picker_dialog_role", "cancel_restores_open_button_focus",
+    "default_image_named_and_keyboard_open", "picker_dialog_role", "cancel_restores_viewer_focus",
     "keyboard_open_cancel_reopen", "toggle_role_state_action", "adjustment_role_range_step_and_action",
     "adjustment_keyboard_focus_and_value", "save_as_dialog_name_and_role", "save_as_keyboard_cancel",
     "crop_keyboard_instructions_and_apply", "notification_alert_name_and_detail", "orca_processes_production_events",
 }
 REQUIRED_NATIVE_DIALOG_SCENARIOS = {
-    "gtk_native_picker_confirmed", "native_open_button", "native_escape_restores_focus",
+    "gtk_native_picker_confirmed", "native_keyboard_open", "native_escape_restores_focus",
     "native_keyboard_reopen_cancel", "native_picker_blocks_background_shortcuts",
     "native_selection_displays_photo", "native_save_cancel_preserves_edits", "native_save_output_decodes",
 }

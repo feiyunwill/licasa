@@ -75,14 +75,12 @@ class ViewerMeasurement final : public QObject, public DiagnosticCheck {
     {
         if (!result_.contains("first_window_frame_ms")) {
             result_["first_window_frame_ms"] = elapsed();
-            result_["welcome_visible_at_first_frame"] =
-                viewport_->property("welcomeVisible").toBool();
+            result_["source_image_at_first_frame"] =
+                window_->property("residentImageUrl").toUrl().toString();
+            result_["image_status_at_first_frame"] = viewport_->property("imageStatus").toInt();
             result_["fullscreen_at_first_frame"] = window_->property("fullScreenMode").toBool();
         }
-        if (viewport_->property("welcomeVisible").toBool()) {
-            result_["welcome_was_presented"] = true;
-        }
-        if (!imageUrl_.isEmpty()) {
+        {
             const int status = viewport_->property("imageStatus").toInt();
             if (status == 3 && !result_.contains("image_failed")) {
                 // A failed initial open must still present a usable window.
@@ -122,11 +120,16 @@ class ViewerMeasurement final : public QObject, public DiagnosticCheck {
         settling_ = true;
         const auto* openButton =
             viewport_->findChild<QQuickItem*>(QStringLiteral("emptyStateOpenButton"));
-        const auto* logo = viewport_->findChild<QObject*>(QStringLiteral("welcomeLogo"));
-        result_["welcome_visible_at_settle"] = viewport_->property("welcomeVisible").toBool();
+        const auto* overlay = viewport_->findChild<QQuickItem*>(QStringLiteral("emptyImageState"));
+        const QSize naturalSize = window_->property("naturalImageSize").toSize();
+        result_["source_image_at_settle"] =
+            window_->property("residentImageUrl").toUrl().toString();
+        result_["natural_image_width"] = naturalSize.width();
+        result_["natural_image_height"] = naturalSize.height();
+        result_["image_status_at_settle"] = viewport_->property("imageStatus").toInt();
+        result_["image_overlay_visible_at_settle"] = overlay && overlay->isVisible();
         result_["open_button_visible_at_settle"] = openButton && openButton->isVisible();
         result_["open_button_focused_at_settle"] = openButton && openButton->hasActiveFocus();
-        result_["logo_status_at_settle"] = logo ? logo->property("status").toInt() : -1;
         result_["assigned_image_at_settle"] =
             !window_->property("residentImageUrl").toUrl().isEmpty();
         // Test-only capture keeps production startup free of screenshot work.

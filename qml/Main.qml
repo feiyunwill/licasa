@@ -1416,7 +1416,9 @@ Window {
             browseBurstActive = false
         }
 
-        if (!replaceCurrent && hasAssignedImage() && imageViewport.imageStatus !== Image.Error) {
+        if (!replaceCurrent && hasAssignedImage() && imageViewport.imageStatus !== Image.Error
+                && (String(residentImageUrl) !== String(windowManager.defaultImageUrl)
+                    || editorHasAdjustments)) {
             windowManager.openInNewWindow(u)
             return
         }
@@ -2643,7 +2645,7 @@ Window {
         windowedTransparencyCheckerboardEnabled: root.windowedTransparencyCheckerboardEnabled
         windowedTransparencyOpacity: root.windowedTransparencyOpacity
         hasImage: root.hasImage()
-        welcomeEnabled: !root.hasAssignedImage() && !root.pendingImageReveal
+        imageAccessibleName: root.displayedFileName || root.currentFileName
 
         imageX: root.imageX()
         imageY: root.imageY()
@@ -2818,7 +2820,6 @@ Window {
         }
 
         onOpenDialogRequested: root.openFileDialog()
-        onSettingsRequested: fullscreenSideMenu.panelOpen = true
 
         onExitFullscreenToImageRequested: {
             root.exitFullScreenToImage()

@@ -14,7 +14,7 @@ import time
 from verify_snap_desktop import pattern_present
 
 REQUIRED_SCENARIOS = {
-    "gtk_native_picker_confirmed", "native_open_button", "native_escape_restores_focus",
+    "gtk_native_picker_confirmed", "native_keyboard_open", "native_escape_restores_focus",
     "native_keyboard_reopen_cancel", "native_picker_blocks_background_shortcuts",
     "native_selection_displays_photo", "native_save_cancel_preserves_edits",
     "native_save_output_decodes",
@@ -210,14 +210,13 @@ def main() -> int:
         args.destination.parent.mkdir(parents=True, exist_ok=True)
         environment = dict(os.environ, QT_LINUX_ACCESSIBILITY_ALWAYS_ON="1")
         app = subprocess.Popen([str(args.app.resolve())], env=environment, stdout=log, stderr=subprocess.STDOUT)
-        opened = wait("Open image button", lambda: find("Open image", pyatspi.ROLE_PUSH_BUTTON))
-        opened.queryComponent().grabFocus()
+        wait("default image", lambda: find("licasa-4096x4096.png", pyatspi.ROLE_IMAGE))
         window = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--pid", str(app.pid), "--name", "^Licasa$"], text=True).splitlines()[-1]
         subprocess.run(["xdotool", "windowactivate", "--sync", window], check=True, timeout=5)
-        action(opened)
+        key("ctrl+o")
         confirm_native()
         record("gtk_native_picker_confirmed")
-        record("native_open_button")
+        record("native_keyboard_open")
         if not any(node.getRole() == pyatspi.ROLE_COMBO_BOX and node.name.strip() == "Images"
                    for node in owned_nodes() if showing(node)):
             raise RuntimeError("Native Open picker does not expose its Images filter")
@@ -229,7 +228,8 @@ def main() -> int:
         record("native_picker_blocks_background_shortcuts")
         key("Escape")
         wait("native Escape closes picker", lambda: picker() is None)
-        wait("Open image focus restored", lambda: find("Open image", pyatspi.ROLE_PUSH_BUTTON).getState().contains(pyatspi.STATE_FOCUSED))
+        wait("viewer focus restored", lambda: subprocess.check_output(
+            ["xdotool", "getactivewindow"], text=True, timeout=3).strip() == window)
         record("native_escape_restores_focus")
         key("ctrl+o")
         confirm_native()

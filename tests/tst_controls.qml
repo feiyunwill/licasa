@@ -141,7 +141,6 @@ Item {
             windowedTransparencyCheckerboardEnabled: true
             windowedTransparencyOpacity: 0.55
             hasImage: true
-            welcomeLogoSource: Qt.resolvedUrl("../assets/licasa.png")
             imageX: 0
             imageY: 0
             imageWidth: 1240
@@ -167,7 +166,6 @@ Item {
         ImageViewport {
             width: 640
             height: 480
-            welcomeLogoSource: Qt.resolvedUrl("../assets/licasa.png")
             fullScreenMode: true
             fullscreenBackdropOpacity: 0.7
             transparencyCheckerboardEnabled: false
@@ -846,100 +844,70 @@ Item {
         tryVerify(function() { return exportTab.activeFocus })
     }
 
-    function test_emptyImageStateFitsAndOpensWithKeyboard() {
+    function test_nullViewportHasNoWelcomePanel() {
         const viewport = createTemporaryObject(imageViewportComponent, visualRoot, {
-            "providerSource": "",
-            "hasImage": false,
-            "width": 190,
-            "height": 130
+            "providerSource": "", "hasImage": false, "width": 460, "height": 220
+        })
+        verify(viewport)
+        compare(viewport.imageStatus, Image.Null)
+        compare(findChild(viewport, "emptyImageState").visible, false)
+        compare(findChild(viewport, "welcomeLogo"), null)
+        compare(findChild(viewport, "welcomeSettingsButton"), null)
+        compare(viewport.focusOpenAction(), false)
+    }
+
+    function test_failedImageRetryFitsAndOpensWithKeyboard() {
+        const viewport = createTemporaryObject(imageViewportComponent, visualRoot, {
+            "providerSource": "", "hasImage": false, "width": 190, "height": 130,
+            "externalOpenFailed": true
         })
         verify(viewport)
         const card = findChild(viewport, "emptyImageState")
         const button = findChild(viewport, "emptyStateOpenButton")
-        const logo = findChild(viewport, "welcomeLogo")
-        verify(card)
-        verify(button)
-        verify(logo)
-        compare(viewport.welcomeVisible, true)
-        tryCompare(logo, "status", Image.Ready)
-        compare(viewport.imageStatus, Image.Null)
-        compare(viewport.activeImageSlot, -1)
-        compare(viewport.imageImplicitWidth, 0)
-        compare(viewport.providerSource, "")
+        compare(viewport.imageStatus, Image.Error)
         verify(card.visible)
         verify(card.width <= viewport.width - 24)
         verify(card.height <= viewport.height - 24)
-        const buttonPosition = button.mapToItem(card, 0, 0)
-        verify(buttonPosition.y >= 0)
-        verify(buttonPosition.y + button.height <= card.height)
-        const logoPosition = logo.mapToItem(card, 0, 0)
-        verify(logoPosition.y >= 0)
-        verify(logoPosition.y + logo.height <= buttonPosition.y)
-
-        const openRequested = createSpy(viewport, "openDialogRequested")
+        const position = button.mapToItem(card, 0, 0)
+        verify(position.y >= 0)
+        verify(position.y + button.height <= card.height)
+        const requested = createSpy(viewport, "openDialogRequested")
         compare(viewport.focusOpenAction(), true)
         compare(button.activeFocus, true)
         keyClick(Qt.Key_Return)
-        compare(openRequested.count, 1)
-
+        compare(requested.count, 1)
         viewport.width = 100
         compare(card.visible, false)
         compare(viewport.focusOpenAction(), false)
     }
 
-    function test_welcomeDoesNotHideLoadingFailureOrARealPhoto() {
+    function test_loadingFailureAndRealImageStayDistinct() {
         const viewport = createTemporaryObject(imageViewportComponent, visualRoot, {
-            "providerSource": "",
-            "hasImage": false,
-            "width": 460,
-            "height": 220
+            "providerSource": "", "hasImage": false, "width": 460, "height": 220
         })
         verify(viewport)
-        const logo = findChild(viewport, "welcomeLogo")
+        const card = findChild(viewport, "emptyImageState")
         const title = findChild(viewport, "emptyStateTitle")
         const button = findChild(viewport, "emptyStateOpenButton")
-        const settings = findChild(viewport, "welcomeSettingsButton")
-        compare(viewport.welcomeVisible, true)
-        compare(title.text, "Licasa")
-        verify(settings.visible)
-        const settingsRequested = createSpy(viewport, "settingsRequested")
-        settings.forceActiveFocus()
-        keyClick(Qt.Key_Return)
-        compare(settingsRequested.count, 1)
-
-        // An unsupported initial URL is rejected before any provider source
-        // exists. Empty-source housekeeping must leave its retry UI intact.
+        compare(card.visible, false)
         viewport.externalOpenFailed = true
         wait(20)
         compare(viewport.imageStatus, Image.Error)
-        compare(viewport.welcomeVisible, false)
-        compare(button.visible, true)
+        verify(card.visible)
+        verify(button.visible)
         viewport.externalOpenFailed = false
-        compare(viewport.welcomeVisible, true)
-
-        viewport.fullScreenMode = true
-        compare(settings.visible, false)
-        viewport.welcomeEnabled = false
-        compare(viewport.welcomeVisible, false)
-        compare(logo.visible, false)
-        compare(logo.source.toString(), "")
-
+        compare(card.visible, false)
         viewport.providerSource = Qt.resolvedUrl("test-assets/broken/empty.png").toString()
         compare(viewport.imageStatus, Image.Loading)
         compare(title.text, "Opening image…")
         compare(button.visible, false)
         tryCompare(viewport, "imageStatus", Image.Error)
-        compare(viewport.welcomeVisible, false)
-        compare(logo.visible, false)
         compare(title.text, "That image could not be opened")
         compare(button.visible, true)
         compare(viewport.focusOpenAction(), true)
-
         viewport.providerSource = Qt.resolvedUrl("../assets/licasa.png").toString()
         tryCompare(viewport, "imageStatus", Image.Ready)
-        compare(viewport.welcomeVisible, false)
-        compare(findChild(viewport, "emptyImageState").visible, false)
-        compare(logo.source.toString(), "")
+        compare(card.visible, false)
     }
 
     function test_buttonsEmitClicks() {

@@ -120,19 +120,20 @@ def main() -> int:
         env.update(QT_LINUX_ACCESSIBILITY_ALWAYS_ON="1", QT_QUICK_BACKEND="software")
         app = subprocess.Popen([str(args.app.absolute())], env=env, stdout=log, stderr=subprocess.STDOUT)
         wait("AT-SPI application registration", licasa)
-        opened = wait("named Open image button", lambda: find("Open image", pyatspi.ROLE_PUSH_BUTTON))
-        record("open_button_named_and_actionable")
-        snapshot("empty")
-        # Start with a keyboard action so focus restoration has a precise target.
-        opened.queryComponent().grabFocus()
-        action(opened, "press")
+        wait("default image announced", lambda: find("licasa-4096x4096.png", pyatspi.ROLE_IMAGE))
+        snapshot("default image")
+        key("ctrl+o")
         chooser = wait("announced file picker", picker)
+        record("default_image_named_and_keyboard_open")
         record("picker_dialog_role", chooser.name)
         snapshot("open picker")
         key("Escape")
         wait("picker closes", lambda: picker() is None)
-        wait("Open button focus returns", lambda: find("Open image", pyatspi.ROLE_PUSH_BUTTON).getState().contains(pyatspi.STATE_FOCUSED))
-        record("cancel_restores_open_button_focus")
+        def viewer_has_focus():
+            active = subprocess.check_output(["xdotool", "getactivewindow"], text=True, timeout=3).strip()
+            return int(subprocess.check_output(["xdotool", "getwindowpid", active], text=True, timeout=3)) == app.pid
+        wait("viewer focus returns", viewer_has_focus)
+        record("cancel_restores_viewer_focus")
         key("ctrl+o")
         wait("keyboard reopen", picker)
         key("Escape")
@@ -140,7 +141,7 @@ def main() -> int:
         # Single-instance command routes a real file-open request through the
         # installed app; it is never a substitute QML image source.
         subprocess.run([str(args.app.absolute()), str(args.sample.absolute())], env=env, stdout=log, stderr=subprocess.STDOUT, timeout=8)
-        wait("photo window", lambda: find("Open image", pyatspi.ROLE_PUSH_BUTTON) is None)
+        wait("photo window", lambda: find(args.sample.name, pyatspi.ROLE_IMAGE))
         key("F11") if find("Open settings", pyatspi.ROLE_PUSH_BUTTON) is None else None
         settings = wait("settings button", lambda: find("Open settings", pyatspi.ROLE_PUSH_BUTTON))
         action(settings, "press")

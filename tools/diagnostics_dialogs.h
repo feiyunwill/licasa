@@ -197,14 +197,13 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
         switch (stage_) {
         case 0: {
             auto* viewport = named("imageViewport");
-            auto* button =
-                viewport ? viewport->findChild<QQuickItem*>("emptyStateOpenButton") : nullptr;
-            if (!window_->isExposed() || !button || !button->isVisible()) {
+            if (!window_->isExposed() || !viewport ||
+                viewport->property("imageStatus").toInt() != 1) {
                 return;
             }
-            button->forceActiveFocus();
-            focusTarget_ = button;
-            click(button);
+            focusTarget_ = window_->contentItem();
+            focusTarget_->forceActiveFocus();
+            key(Qt::Key_O, Qt::ControlModifier);
             ++stage_;
             break;
         }
@@ -228,7 +227,7 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
             if (!visible(picker) || !fallbackVisible()) {
                 return;
             }
-            record("open_button_visible_fallback");
+            record("keyboard_open_visible_fallback");
             const bool wasFullscreen = window_->property("fullScreenMode").toBool();
             key(Qt::Key_F11);
             if (window_->property("fullScreenMode").toBool() != wasFullscreen) {
