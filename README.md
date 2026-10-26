@@ -15,12 +15,14 @@ Licasa is an image viewer and editor for the Linux desktop inspired by Google's 
 
 ## Try Licasa
 
-**[Download published releases](https://github.com/sanxchep/licasa/releases)** · [0.8.0 release notes and measured results](packaging/release-notes/v0.8.0.md)
+**[Download published releases](https://github.com/sanxchep/licasa/releases)** · [0.8.1 draft release notes](packaging/release-notes/v0.8.1.md) · [0.8.0 measured results](packaging/release-notes/v0.8.0.md)
 
 **0.8.0** combines 27 runtime optimisations with installation and graphics fixes.
 - View photos fullscreen or in a floating window, then crop, adjust, and export them.
 - Open JPEG, PNG, TIFF, WebP, HEIC/HEIF, JPEG XL, AVIF, JPEG 2000, and RAW previews.
 - Play Motion Photos and animated APNG files.
+
+**0.8.1 is in preparation.** It repairs Debian Trixie installation and file dialogs, adds a separate Debian-native package, and strengthens package regression checks. It has not been published; the download examples below still refer to the published 0.8.0 files.
 
 If you try it, [report a bug or suggest a feature](https://github.com/sanxchep/licasa/issues/new).
 
@@ -61,7 +63,7 @@ If you try it, [report a bug or suggest a feature](https://github.com/sanxchep/l
 
 The native Ubuntu `.deb` is built for **Ubuntu 24.04 only**. It cannot be installed on Debian by changing dependency names: the JPEG, FFmpeg, and Qt binary interfaces differ. Do not force its dependencies or mix Ubuntu repositories into Debian.
 
-The support contract below describes qualification required for a new candidate from this source tree. It does not retroactively certify published 0.8.0 packages. The Debian 13 native target is in development until its complete candidate qualification passes; no Debian-native 0.8.0 download is available. The published 0.8.0 AppImage has a known fallback file-picker defect on Debian, tracked in [issue #3](https://github.com/sanxchep/licasa/issues/3).
+The support contract below describes qualification required for the 0.8.1 candidate from this source tree. It does not retroactively certify published 0.8.0 packages. Debian 13 native installation and GTK dialogs have passed the implementation candidate's tests, but the newly versioned 0.8.1 packages require their own release qualification before publication. Debian remains marked in development, and no Debian-native download is available yet. The published 0.8.0 AppImage has a known fallback file-picker defect on Debian, tracked in [issue #3](https://github.com/sanxchep/licasa/issues/3).
 
 <!-- support-matrix:start -->
 | Package / target | Architecture / libc baseline | Qt runtime | Candidate qualification |
@@ -91,6 +93,10 @@ Download `licasa_0.8.0-1_amd64.deb` and its `.sha256` file. APT installs the req
 sha256sum -c licasa_0.8.0-1_amd64.deb.sha256
 sudo apt install ./licasa_0.8.0-1_amd64.deb
 ```
+
+### Debian 13 (Trixie) candidate
+
+The planned native package is `licasa_0.8.1-1+deb13_amd64.deb`, built against Debian's Qt and multimedia libraries. It is not published yet. Maintainers can build and verify it using the Debian instructions below; the Ubuntu `.deb` is not a substitute.
 
 ### Fedora 44 (x86-64)
 
@@ -142,11 +148,11 @@ For automatic Store updates, install from the stable channel:
 sudo snap install licasa
 ```
 
-A directly installed candidate Snap uses `licasa_0.8.0_amd64.snap` and its `.sha256` file:
+A directly installed 0.8.1 candidate Snap uses `licasa_0.8.1_amd64.snap` and its `.sha256` file. These commands apply to a candidate artifact, not the current published download:
 
 ```sh
-sha256sum -c licasa_0.8.0_amd64.snap.sha256
-sudo snap install --dangerous ./licasa_0.8.0_amd64.snap
+sha256sum -c licasa_0.8.1_amd64.snap.sha256
+sudo snap install --dangerous ./licasa_0.8.1_amd64.snap
 ```
 
 In **Settings**, turn on **Background process** if you want faster repeat opens. Licasa then stays ready when you close its window and starts in the background at your next desktop login, including after a reboot. This is off by default. Turning it off removes the login startup entry; closing Licasa then exits it. This works through your desktop session, so it does not start before you log in.
@@ -164,7 +170,7 @@ Store-installed Snaps update automatically. To switch an existing Snap to the be
 Use the command for the package you installed:
 
 ```sh
-sudo apt remove licasa             # Ubuntu .deb
+sudo apt remove licasa             # Native .deb
 sudo dnf remove licasa-appimage    # Fedora RPM
 sudo pacman -R licasa-appimage     # Arch package
 sudo snap remove licasa            # Snap
@@ -190,8 +196,8 @@ docker run --rm -v "$PWD:/source:ro" -v "$PWD/build/deb-output:/output" \
 The `.deb`, AppImage, and SHA-256 files appear in `build/deb-output/`. Docker is required only to build these packages from source. To check the local files:
 
 ```sh
-(cd build/deb-output && sha256sum -c licasa_0.8.0-1_amd64.deb.sha256)
-(cd build/deb-output && sha256sum -c Licasa-0.8.0-x86_64.AppImage.sha256)
+(cd build/deb-output && sha256sum -c licasa_0.8.1-1_amd64.deb.sha256)
+(cd build/deb-output && sha256sum -c Licasa-0.8.1-x86_64.AppImage.sha256)
 (cd build/deb-output && sha256sum -c install-licasa-appimage.sh.sha256)
 ```
 
@@ -231,7 +237,7 @@ Expose the guest's SSH port on localhost and QEMU's QMP socket in a dedicated re
 python3 tools/verify_linux_vm_desktop.py \
   --port 46601 --identity ./vm/key --known-hosts ./vm/known_hosts \
   --qmp ./vm/qmp.sock --desktop gnome --variant appimage \
-  --guest-appimage /home/qualifier/Licasa-0.8.0-x86_64.AppImage \
+  --guest-appimage /home/qualifier/Licasa-0.8.1-x86_64.AppImage \
   --output ./reports/gnome-appimage
 ```
 
@@ -246,11 +252,11 @@ Automatic Wayland launches prefer OpenGL ES to avoid a reproduced black-window f
 `tools/verify_appimage_graphics.py` checks a real GPU through a private Weston Wayland session. First run the Fedora/Arch AppImage installation qualification above the graphics layer, then build the matching test image:
 
 ```sh
-python3 tools/verify_appimage_fedora.py ./build/deb-output/Licasa-0.8.0-x86_64.AppImage \
+python3 tools/verify_appimage_fedora.py ./build/deb-output/Licasa-0.8.1-x86_64.AppImage \
   --output ./reports/fedora-installation.json
 docker build -f packaging/verify-graphics-fedora.Dockerfile -t licasa-graphics-fedora .
 python3 tools/verify_appimage_graphics.py \
-  --appimage ./build/deb-output/Licasa-0.8.0-x86_64.AppImage \
+  --appimage ./build/deb-output/Licasa-0.8.1-x86_64.AppImage \
   --image licasa-graphics-fedora --render-node /dev/dri/renderD129 \
   --output ./reports/fedora-graphics
 ```

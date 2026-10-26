@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
 spec = importlib.util.spec_from_file_location("snap_desktop", ROOT / "tools/verify_snap_desktop.py")
 desktop = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(desktop)
