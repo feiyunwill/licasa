@@ -13,6 +13,8 @@ import tempfile
 
 from display_session_results import parse_display_graphics
 from verify_installed_release import SAMPLES
+from package_dialog_checks import run_dialog_checks
+from package_motion_checks import run_motion_checks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,10 +29,15 @@ HOST_RUNTIME_PACKAGES = (
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("appimage", type=Path)
-    parser.add_argument("--ubuntu-version", choices=("24.04", "26.04"), default="24.04")
+    parser.add_argument("--ubuntu-version", choices=("24.04", "26.04"))
+    parser.add_argument("--target", choices=("ubuntu-24.04", "ubuntu-26.04", "debian-13"))
     parser.add_argument("--output", type=Path,
                         default=ROOT / "build/qualification/appimage/install-smoke.json")
     args = parser.parse_args()
+    if args.target and args.ubuntu_version and args.target != f"ubuntu-{args.ubuntu_version}":
+        parser.error("--target and --ubuntu-version select different userspaces")
+    args.target = args.target or f"ubuntu-{args.ubuntu_version or '24.04'}"
+    args.ubuntu_version = args.target.removeprefix("ubuntu-") if args.target.startswith("ubuntu-") else None
     appimage = args.appimage.resolve(strict=True)
     sample_paths = {**SAMPLES, **EXTRA_SAMPLES}
     samples = [ROOT / "tests/test-assets" / name for name in sample_paths.values()]
@@ -43,7 +50,7 @@ def main() -> None:
         shutil.copy2(ROOT / "packaging/install-licasa-appimage.sh",
                      work / "install-licasa-appimage.sh")
         (work / "Dockerfile").write_text(
-            f"FROM ubuntu:{args.ubuntu_version}\n"
+            f"FROM {'debian:trixie-slim' if args.target == 'debian-13' else 'ubuntu:' + args.ubuntu_version}\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends "
             + " ".join(HOST_RUNTIME_PACKAGES) + " "
             "&& rm -rf /var/lib/apt/lists/*\n"
@@ -56,9 +63,9 @@ def main() -> None:
             "/tmp/squashfs-root/usr/lib/licasa/lib:/tmp/squashfs-root/usr/lib "
             "/tmp/squashfs-root/usr' && rm -rf /tmp/squashfs-root\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends "
-            "desktop-file-utils xdg-utils xvfb x11-utils weston libgl1-mesa-dri "
+            "desktop-file-utils xdg-utils xvfb x11-utils openbox weston libgl1-mesa-dri python3 "
             "&& rm -rf /var/lib/apt/lists/*\n")
-        tag = f"licasa-appimage-ubuntu-{args.ubuntu_version}-verify:local"
+        tag = f"licasa-appimage-{args.target}-verify:local"
         subprocess.run(["docker", "build", "--tag", tag, str(work)], check=True)
         command = (
             "cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null; "
@@ -167,6 +174,15 @@ def main() -> None:
                                        f"{display.stdout}\n{display.stderr}")
                 displays[name] = parse_display_graphics(display.stdout, context=f"Ubuntu AppImage {name}")
         report["display_sessions"] = displays
+        report["dialog_interactions"] = run_dialog_checks(
+            tag, output_dir=args.output.parent / "dialog-artifacts", app="/tmp/squashfs-root/AppRun",
+            diagnostic="/tmp/squashfs-root/usr/bin/licasa_diagnostics", sample=samples[0],
+            setup="cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null;")
+        report["target"] = args.target
+        report["motion_photo"] = run_motion_checks(
+            tag, diagnostic="/tmp/squashfs-root/usr/bin/licasa_diagnostics",
+            runtime_root="/tmp/squashfs-root/usr", output_dir=args.output.parent / "motion-artifacts",
+            setup="cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null;")
         report["ubuntu_version"] = args.ubuntu_version
         report["runtime_dependencies_checked_before_desktop_tools"] = True
         report["host_runtime_packages"] = HOST_RUNTIME_PACKAGES

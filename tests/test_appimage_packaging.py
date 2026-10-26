@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
 spec = importlib.util.spec_from_file_location("appimage_packager", ROOT / "tools/package_appimage.py")
 packager = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packager)
@@ -26,9 +27,18 @@ class AppImagePackagingTests(unittest.TestCase):
         self.work = Path(temporary.name)
         self.libraries = self.work / "qt/lib"
         self.plugins = self.work / "qt/plugins"
+        self.qml = self.work / "qt/qml"
         for name in ("libQt6WlShellIntegration.so.6", "libQt6WaylandEglClientHwIntegration.so.6",
-                     "libSM.so.6", "libICE.so.6", "libuuid.so.1", "libfribidi.so.0"):
+                     "libSM.so.6", "libICE.so.6", "libuuid.so.1", "libfribidi.so.0",
+                     "libgpg-error.so.0", "libcom_err.so.2", "libQt6LabsFolderListModel.so.6"):
             self.write(self.libraries / name, name.encode())
+        for module in packager.requirements()["modules"]:
+            directory = packager.module_directory(self.qml, module["uri"])
+            plugins = module["plugins"]["6.4.2"]
+            metadata = f"module {module['uri']}\n" + "".join(f"plugin {name}\n" for name in plugins)
+            self.write(directory / "qmldir", metadata.encode())
+            for name in plugins:
+                self.write(directory / f"lib{name}.so")
         for name in ("platforms/libqwayland-egl.so", "platforms/libqwayland-generic.so",
                      "wayland-decoration-client/decoration.so",
                      "wayland-graphics-integration-client/libqt-plugin-wayland-egl.so",
@@ -39,6 +49,7 @@ class AppImagePackagingTests(unittest.TestCase):
                      "usr/share/icons/hicolor/512x512/apps/licasa.png",
                      "usr/lib/licasa/lib/libQt6Quick.so.6", "usr/lib/licasa/lib/libdav1d.so.7",
                      "usr/lib/libopenjp2.so.7",
+                     "usr/lib/licasa/plugins/multimedia/libffmpegmediaplugin.so",
                      "usr/lib/licasa/plugins/imageformats/liblicasa_jp2_plugin.so"):
             self.write(self.payload / name)
         self.package = self.work / "fixture.deb"
@@ -49,7 +60,10 @@ class AppImagePackagingTests(unittest.TestCase):
         self.image_created = False
         self.omit_library = None
         self.omit_dav1d = False
+        self.omit_module = None
+        self.skip_style_scan = False
         self.deployed_dav1d = b"distro dav1d selected by dependency scan"
+        self.deployed_ffmpeg = b"unpatched distro multimedia backend"
 
     def write(self, path, content=b"synthetic fixture"):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +72,8 @@ class AppImagePackagingTests(unittest.TestCase):
     def metadata(self, command, **kwargs):
         if command[0] == "dpkg-deb":
             return {"Package": "licasa", "Architecture": "amd64", "Version": "0.7.1-1"}[command[-1]]
-        return str({"QT_INSTALL_PLUGINS": self.plugins, "QT_INSTALL_LIBS": self.libraries}[command[-1]])
+        return str({"QT_INSTALL_PLUGINS": self.plugins, "QT_INSTALL_LIBS": self.libraries,
+                    "QT_INSTALL_QML": self.qml, "QT_VERSION": "6.4.2"}[command[-1]])
 
     def run_tool(self, command, **kwargs):
         name = Path(command[0]).name
@@ -70,6 +85,14 @@ class AppImagePackagingTests(unittest.TestCase):
             for plugin in ("libqxcb.so", "libqoffscreen.so", "libqwayland-egl.so", "libqwayland-generic.so"):
                 self.write(appdir / "usr/plugins/platforms" / plugin)
             self.write(appdir / "usr/lib/libQt6Quick.so.6")
+            self.write(appdir / "usr/plugins/multimedia/libffmpegmediaplugin.so", self.deployed_ffmpeg)
+            # Runtime style selection is not a source import that the deployer
+            # can always discover. Explicit staging must survive that case.
+            def ignore_styles(directory, names):
+                return ["Basic"] if self.skip_style_scan and Path(directory) == self.qml / "QtQuick/Controls" else []
+            shutil.copytree(self.qml, appdir / "usr/qml", dirs_exist_ok=True, ignore=ignore_styles)
+            if self.omit_module:
+                shutil.rmtree(packager.module_directory(appdir / "usr/qml", self.omit_module))
             if not self.omit_dav1d:
                 self.write(appdir / "usr/lib/libdav1d.so.7", self.deployed_dav1d)
             # Model the failure: excluded libraries are copied only when explicitly requested.
@@ -80,7 +103,7 @@ class AppImagePackagingTests(unittest.TestCase):
                         shutil.copy2(source, appdir / "usr/lib" / source.name)
         elif name == "appimagetool-x86_64.AppImage":
             appdir = Path(command[-2])
-            for library in ("libSM.so.6", "libICE.so.6", "libuuid.so.1", "libfribidi.so.0"):
+            for library in packager.PORTABLE_RUNTIME_LIBRARIES:
                 self.assertEqual((appdir / "usr/lib" / library).read_bytes(), library.encode())
             quick = appdir / "usr/lib/libQt6Quick.so.6"
             self.assertTrue(quick.is_symlink())
@@ -89,6 +112,11 @@ class AppImagePackagingTests(unittest.TestCase):
             self.assertTrue(dav1d.is_symlink())
             self.assertEqual(dav1d.readlink(), Path("licasa/lib/libdav1d.so.7"))
             self.assertEqual(dav1d.read_bytes(), (self.payload / "usr/lib/licasa/lib/libdav1d.so.7").read_bytes())
+            ffmpeg = appdir / "usr/plugins/multimedia/libffmpegmediaplugin.so"
+            private_ffmpeg = appdir / "usr/lib/licasa/plugins/multimedia/libffmpegmediaplugin.so"
+            self.assertTrue(ffmpeg.is_symlink())
+            self.assertEqual(ffmpeg.resolve(), private_ffmpeg.resolve())
+            self.assertEqual(ffmpeg.read_bytes(), (self.payload / private_ffmpeg.relative_to(appdir)).read_bytes())
             self.assertEqual(set(self.patched_helpers), {
                 "wayland-decoration-client/decoration.so",
                 "wayland-graphics-integration-client/libqt-plugin-wayland-egl.so",
@@ -104,7 +132,8 @@ class AppImagePackagingTests(unittest.TestCase):
             self.assertTrue(plugin.is_file())
             self.assertTrue(self.deployment_commands)
             self.assertFalse(self.image_created)
-            self.patched_helpers["/".join(plugin.parts[-2:])] = command[2]
+            if "wayland-" in str(plugin):
+                self.patched_helpers["/".join(plugin.parts[-2:])] = command[2]
         else:
             self.fail(f"Unexpected tool request: {command}")
 
@@ -129,6 +158,65 @@ class AppImagePackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Missing AppImage runtime library: .*libfribidi"):
             self.assemble()
         self.assertFalse(self.deployment_commands)
+        self.assertFalse(self.image_created)
+
+    def test_missing_folderlistmodel_stops_before_deployment(self):
+        shutil.rmtree(packager.module_directory(self.qml, "Qt.labs.folderlistmodel"))
+        with self.assertRaisesRegex(RuntimeError, "Missing QML runtime file"):
+            self.assemble()
+        self.assertFalse(self.deployment_commands)
+        self.assertFalse(self.image_created)
+
+    def test_deployer_dropping_dialog_dependency_cannot_produce_an_image(self):
+        self.omit_module = "Qt.labs.folderlistmodel"
+        with self.assertRaisesRegex(RuntimeError, "Missing QML runtime file"):
+            self.assemble()
+        self.assertFalse(self.image_created)
+
+    def test_missing_basic_style_stops_before_deployment(self):
+        shutil.rmtree(packager.module_directory(self.qml, "QtQuick.Controls.Basic"))
+        with self.assertRaisesRegex(RuntimeError, "Missing QML runtime file"):
+            self.assemble()
+        self.assertFalse(self.deployment_commands)
+        self.assertFalse(self.image_created)
+
+    def test_missing_basic_style_implementation_stops_before_deployment(self):
+        shutil.rmtree(packager.module_directory(self.qml, "QtQuick.Controls.Basic.impl"))
+        with self.assertRaisesRegex(RuntimeError, "Missing QML runtime file"):
+            self.assemble()
+        self.assertFalse(self.deployment_commands)
+        self.assertFalse(self.image_created)
+
+    def test_deployer_dropping_fallback_style_cannot_produce_an_image(self):
+        for uri in ("QtQuick.Controls.Basic", "QtQuick.Controls.Basic.impl"):
+            with self.subTest(uri=uri):
+                self.omit_module = uri
+                self.image_created = False
+                with self.assertRaisesRegex(RuntimeError, "Missing QML runtime file"):
+                    self.assemble()
+                self.assertFalse(self.image_created)
+
+    def test_runtime_only_fallback_style_survives_missing_scanner_discovery(self):
+        self.skip_style_scan = True
+        self.assemble()
+        self.assertTrue(self.image_created)
+
+    def test_deployer_dropping_gpg_error_cannot_produce_an_image(self):
+        self.omit_library = "libgpg-error.so.0"
+        with self.assertRaisesRegex(RuntimeError, "AppDir is missing.*libgpg-error"):
+            self.assemble()
+        self.assertFalse(self.image_created)
+
+    def test_deployer_dropping_com_err_cannot_produce_an_image(self):
+        self.omit_library = "libcom_err.so.2"
+        with self.assertRaisesRegex(RuntimeError, "AppDir is missing.*libcom_err"):
+            self.assemble()
+        self.assertFalse(self.image_created)
+
+    def test_deployer_dropping_folderlistmodel_library_cannot_produce_an_image(self):
+        self.omit_library = "libQt6LabsFolderListModel.so.6"
+        with self.assertRaisesRegex(RuntimeError, "AppDir is missing.*libQt6LabsFolderListModel"):
+            self.assemble()
         self.assertFalse(self.image_created)
 
     def test_incomplete_deployment_stops_before_image_creation(self):
@@ -168,6 +256,20 @@ class AppImagePackagingTests(unittest.TestCase):
                 self.assemble()
                 self.assertTrue(self.image_created)
 
+    def test_distro_multimedia_backend_cannot_override_qualified_private_plugin(self):
+        for deployed in (b"unpatched distro plugin", b"different deployer plugin"):
+            with self.subTest(deployed=deployed):
+                self.image_created = False
+                self.deployed_ffmpeg = deployed
+                self.assemble()
+                self.assertTrue(self.image_created)
+
+    def test_missing_private_multimedia_backend_cannot_fall_back_to_distro_plugin(self):
+        (self.payload / "usr/lib/licasa/plugins/multimedia/libffmpegmediaplugin.so").unlink()
+        with self.assertRaisesRegex(RuntimeError, "missing its qualified private FFmpeg plugin"):
+            self.assemble()
+        self.assertFalse(self.image_created)
+
     def test_missing_private_dav1d_stops_before_image_creation(self):
         (self.payload / "usr/lib/licasa/lib/libdav1d.so.7").unlink()
         with self.assertRaisesRegex(RuntimeError, "missing dav1d or its pinned private runtime"):
@@ -183,6 +285,40 @@ class AppImagePackagingTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("cc") and shutil.which("patchelf"), "requires a C compiler and patchelf")
 class WaylandPluginLoaderTests(unittest.TestCase):
+    def test_fallback_style_plugins_load_bundled_dependencies_without_overrides(self):
+        with tempfile.TemporaryDirectory(prefix="licasa-qml-loader-fixture-") as temporary:
+            work = Path(temporary)
+            appdir = work / "AppDir with spaces"
+            libraries = appdir / "usr/lib"
+            libraries.mkdir(parents=True)
+            dependency = "liblicasa_qml_loader_fixture.so.1"
+            source = work / "dependency.c"
+            source.write_text("int licasa_qml_fixture_value(void) { return 42; }\n")
+            subprocess.run(["cc", "-shared", "-fPIC", f"-Wl,-soname,{dependency}", str(source),
+                            "-o", str(libraries / dependency)], check=True, capture_output=True)
+            source = work / "plugin.c"
+            source.write_text("extern int licasa_qml_fixture_value(void);\n"
+                              "int licasa_qml_fixture_result(void) { return licasa_qml_fixture_value(); }\n")
+            plugins = []
+            env = {key: value for key, value in os.environ.items()
+                   if key not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")}
+            probe = [sys.executable, "-c", "import ctypes, sys; p = ctypes.CDLL(sys.argv[1]); "
+                     "assert p.licasa_qml_fixture_result() == 42"]
+            for uri in ("QtQuick.Controls.Basic", "QtQuick.Controls.Basic.impl"):
+                directory = packager.module_directory(appdir / "usr/qml", uri)
+                directory.mkdir(parents=True, exist_ok=True)
+                plugin = directory / "libfixture.so"
+                subprocess.run(["cc", "-shared", "-fPIC", str(source), f"-L{libraries}",
+                                f"-l:{dependency}", "-o", str(plugin)], check=True, capture_output=True)
+                baseline = subprocess.run([*probe, str(plugin)], env=env, text=True, capture_output=True)
+                self.assertNotEqual(baseline.returncode, 0)
+                self.assertIn(dependency, baseline.stderr)
+                plugins.append(plugin)
+            packager.set_qml_plugin_runpaths(appdir)
+            for plugin in plugins:
+                loaded = subprocess.run([*probe, str(plugin)], env=env, text=True, capture_output=True)
+                self.assertEqual(loaded.returncode, 0, loaded.stderr)
+
     def test_helper_loads_its_bundled_dependency_without_loader_overrides(self):
         with tempfile.TemporaryDirectory(prefix="licasa-wayland-loader-fixture-") as temporary:
             work = Path(temporary)

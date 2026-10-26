@@ -8,11 +8,19 @@
   "patches": [
     "packaging/patches/qt-6.4-ffmpeg-input-cleanup.patch",
     "packaging/patches/qt-6.4-ffmpeg-decoding-device-override.patch",
-    "packaging/patches/qt-6.4-ffmpeg-frame-duration.patch"
+    "packaging/patches/qt-6.4-ffmpeg-frame-duration.patch",
+    "packaging/patches/qt-6.4-ffmpeg-demuxer-start-wakeup.patch"
   ],
   "references": [
     "https://ffmpeg.org/doxygen/6.1/avio_read_callback_8c-example.html",
     "https://github.com/qt/qtmultimedia/blob/v6.5.3/src/plugins/multimedia/ffmpeg/qffmpeghwaccel.cpp"
   ],
-  "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+  "required_features": [
+    "linux_v4l",
+    "linux_dmabuf"
+  ],
+  "disabled_features": [
+    "vaapi"
+  ]
 }

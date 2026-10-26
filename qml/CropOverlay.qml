@@ -42,6 +42,12 @@ Item {
 
     visible: active && imageWidth > 0 && imageHeight > 0
     enabled: visible
+    activeFocusOnTab: visible
+    Accessible.role: Accessible.Pane
+    Accessible.name: "Crop frame"
+    Accessible.description: "Alt and arrow keys move the crop. Add Shift to resize. Enter applies; Escape cancels."
+    Accessible.focusable: visible
+    Accessible.focused: activeFocus
 
     function clamp(value, minimum, maximum) {
         return Math.max(minimum, Math.min(maximum, value))

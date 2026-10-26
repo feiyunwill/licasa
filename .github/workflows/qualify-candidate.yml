@@ -1,0 +1,215 @@
+name: Qualify exact release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful package build run; dispatch this workflow at the candidate tag
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: qualify-candidate-${{ inputs.build_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+      matrix: ${{ steps.source.outputs.matrix }}
+    steps:
+      - name: Resolve the successful candidate build
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" > "$RUNNER_TEMP/build.json"
+          python3 - "$RUNNER_TEMP/build.json" "$GITHUB_OUTPUT" <<'PY'
+          import json, os, sys
+          build = json.load(open(sys.argv[1]))
+          if (build['path'].split('@', 1)[0] != '.github/workflows/snapcraft-build.yml'
+                  or build['conclusion'] != 'success' or build['head_branch'] != 'main'
+                  or build['head_sha'] != os.environ['GITHUB_SHA']
+                  or build['repository']['full_name'] != os.environ['GITHUB_REPOSITORY']):
+              raise SystemExit('Dispatch at the exact candidate tag from a successful main package build')
+          with open(sys.argv[2], 'a') as output:
+              output.write(f"sha={build['head_sha']}\n")
+          PY
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.build.outputs.sha }}
+          persist-credentials: false
+      - name: Validate the candidate support contract
+        id: source
+        env:
+          SOURCE_SHA: ${{ steps.build.outputs.sha }}
+        run: |
+          version="$(sed -n "s/^version: '\([0-9.]*\)'$/\1/p" snap/snapcraft.yaml)"
+          test -n "$version"
+          matrix="$(python3 tools/check_support_manifest.py --matrix)"
+          {
+            echo "sha=$SOURCE_SHA"
+            echo "version=$version"
+            echo "matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+
+  packages:
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        target: ${{ fromJSON(needs.source.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: licasa-linux-amd64
+          path: dist
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: licasa-debian13-amd64
+          path: dist/debian13
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Run the manifest's package and interaction checks
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          mkdir -p reports
+          python3 tools/qualification_evidence.py run-target --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" \
+            --packages dist --evidence reports --target "$TARGET"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: candidate-${{ matrix.target }}
+          path: reports/
+          retention-days: 90
+          if-no-files-found: error
+
+  snap_desktops:
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        desktop: [gnome, kde]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: licasa-snap-amd64
+          path: dist/snap
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Install the exact candidate and disposable desktop
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          DESKTOP: ${{ matrix.desktop }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pil xvfb dbus-x11 \
+            libglib2.0-bin x11-utils xdotool imagemagick mesa-utils libgl1-mesa-dri fonts-dejavu-core
+          case "$DESKTOP" in
+            gnome) sudo apt-get install -y --no-install-recommends gnome-shell ;;
+            kde) sudo apt-get install -y --no-install-recommends kwin-x11 kwin-wayland qtwayland5 plasma-desktop plasma-workspace plasma-workspace-wayland ;;
+          esac
+          (cd dist/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
+          sudo snap set system experimental.user-daemons=false
+          sudo snap install --dangerous "dist/snap/licasa_${VERSION}_amd64.snap"
+          python3 tools/verify_snap_install.py --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --output reports-install.json
+      - name: Qualify GNOME or Plasma with retained evidence
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          TARGET: ubuntu24-snap-${{ matrix.desktop }}
+        run: |
+          /usr/bin/python3 tools/qualification_evidence.py run-target --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" \
+            --packages dist --evidence reports --target "$TARGET"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: candidate-snap-${{ matrix.desktop }}
+          path: reports/
+          retention-days: 90
+          if-no-files-found: error
+
+  attest:
+    needs: [source, packages, snap_desktops]
+    if: ${{ always() && needs.source.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: licasa-linux-amd64
+          path: dist
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: licasa-debian13-amd64
+          path: dist/debian13
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: licasa-snap-amd64
+          path: dist/snap
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: candidate-*
+          path: evidence
+          merge-multiple: true
+      - name: Bind all outcomes to the exact candidate
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          python3 tools/qualification_evidence.py assemble --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" --packages dist --evidence evidence
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: licasa-candidate-qualification
+          path: evidence/
+          retention-days: 90
+          if-no-files-found: error

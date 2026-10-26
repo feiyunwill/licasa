@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -12,11 +13,15 @@ import subprocess
 import tempfile
 from urllib.request import Request, urlopen
 
+from qt_runtime import module_directory, requirements, validate_runtime
+
 
 ROOT = Path(__file__).resolve().parents[1]
 # linuxdeploy excludes these by default, but minimal desktops need our copies
-# for Qt's X11 plugins, libSM's UUID dependency and bundled FFmpeg/Pango.
-PORTABLE_RUNTIME_LIBRARIES = ("libSM.so.6", "libICE.so.6", "libuuid.so.1", "libfribidi.so.0")
+# for Qt's X11 plugins, libSM's UUID dependency, bundled FFmpeg/Pango,
+# and the crypto/Kerberos dependency closure on minimal Debian desktops.
+PORTABLE_RUNTIME_LIBRARIES = ("libSM.so.6", "libICE.so.6", "libuuid.so.1", "libfribidi.so.0",
+                              "libgpg-error.so.0", "libcom_err.so.2")
 TOOLS = {
     "linuxdeploy-x86_64.AppImage": (
         "https://github.com/linuxdeploy/linuxdeploy/releases/download/"
@@ -56,7 +61,7 @@ def fetch_tools(directory: Path) -> None:
                 temporary.replace(path)
             finally:
                 temporary.unlink(missing_ok=True)
-        if name.endswith(".AppImage"):
+        if name.endswith(".AppImage") and not os.access(path, os.X_OK):
             path.chmod(0o755)
 
 
@@ -74,6 +79,45 @@ def set_wayland_plugin_runpaths(appdir: Path, groups: tuple[str, ...]) -> None:
     for group in groups:
         for plugin in sorted((appdir / "usr/plugins" / group).glob("*.so")):
             run(["patchelf", "--set-rpath", "$ORIGIN/../../lib:$ORIGIN", str(plugin)])
+
+
+def stage_qml_modules(source: Path, appdir: Path) -> None:
+    """Retain runtime-only imports before linuxdeploy scans ELF dependencies."""
+    for module in requirements()["modules"]:
+        if not module.get("deploy_explicitly"):
+            continue
+        directory = module_directory(source, module["uri"])
+        if not (directory / "qmldir").is_file():
+            raise RuntimeError(f"Missing QML runtime module {module['uri']}; install {module['package']}")
+        destination = module_directory(appdir / "usr/qml", module["uri"])
+        shutil.copytree(directory, destination, symlinks=True, dirs_exist_ok=True)
+
+
+def set_qml_plugin_runpaths(appdir: Path) -> None:
+    for module in requirements()["modules"]:
+        if not module.get("deploy_explicitly"):
+            continue
+        directory = module_directory(appdir / "usr/qml", module["uri"])
+        relative = os.path.relpath(appdir / "usr/lib", directory)
+        for plugin in sorted(directory.glob("*.so")):
+            run(["patchelf", "--set-rpath", f"$ORIGIN/{relative}:$ORIGIN", str(plugin)])
+
+
+def pin_multimedia_backend(appdir: Path) -> dict:
+    """Every Qt plugin search order must select the qualified private backend."""
+    private = appdir / "usr/lib/licasa/plugins/multimedia/libffmpegmediaplugin.so"
+    canonical = appdir / "usr/plugins/multimedia/libffmpegmediaplugin.so"
+    if not private.is_file():
+        raise RuntimeError("AppDir is missing its qualified private FFmpeg plugin")
+    # linuxdeploy also copies the distro multimedia backend into Qt's canonical
+    # plugin directory. Its different search priority must not undo our fixes.
+    run(["patchelf", "--set-rpath", "$ORIGIN/../../lib:$ORIGIN/../../..:$ORIGIN", str(private)])
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.unlink(missing_ok=True)
+    canonical.symlink_to(os.path.relpath(private, canonical.parent))
+    return {"private_path": str(private.relative_to(appdir)),
+            "canonical_path": str(canonical.relative_to(appdir)),
+            "sha256": hashlib.sha256(private.read_bytes()).hexdigest()}
 
 
 def main() -> None:
@@ -101,6 +145,13 @@ def main() -> None:
         ["qmake6", "-query", "QT_INSTALL_PLUGINS"], text=True).strip())
     qt_libraries = Path(subprocess.check_output(
         ["qmake6", "-query", "QT_INSTALL_LIBS"], text=True).strip())
+    qt_qml = Path(subprocess.check_output(
+        ["qmake6", "-query", "QT_INSTALL_QML"], text=True).strip())
+    qt_version = subprocess.check_output(["qmake6", "-query", "QT_VERSION"], text=True).strip()
+    if qt_version != "6.4.2":
+        raise RuntimeError("The portable Ubuntu payload must be deployed with matching Qt 6.4.2")
+    # This also rejects a partially installed build environment before any bundle is made.
+    validate_runtime(qt_qml, qt_libraries, qt_version)
     wayland_platforms = ("libqwayland-egl.so", "libqwayland-generic.so")
     for plugin in wayland_platforms:
         if not (qt_plugins / "platforms" / plugin).is_file():
@@ -117,8 +168,10 @@ def main() -> None:
     if not wl_shell_library.is_file():
         raise RuntimeError("Missing Qt Wayland shell integration library; install qt6-wayland")
     wayland_egl_library = qt_libraries / "libQt6WaylandEglClientHwIntegration.so.6"
+    qml_libraries = tuple(qt_libraries / name for module in requirements()["modules"]
+                          if module.get("deploy_explicitly") for name in module.get("libraries", []))
     forced_libraries = (wl_shell_library, wayland_egl_library,
-                        *(qt_libraries / name for name in PORTABLE_RUNTIME_LIBRARIES))
+                        *(qt_libraries / name for name in PORTABLE_RUNTIME_LIBRARIES), *qml_libraries)
     for library in forced_libraries:
         if not library.is_file():
             raise RuntimeError(f"Missing AppImage runtime library: {library}")
@@ -137,6 +190,7 @@ def main() -> None:
         # dependency scanner runs.
         for group in wayland_plugin_groups:
             shutil.copytree(qt_plugins / group, appdir / "usr/plugins" / group)
+        stage_qml_modules(qt_qml, appdir)
         env = os.environ.copy()
         env.update(APPIMAGE_EXTRACT_AND_RUN="1", QML_SOURCES_PATHS=str(ROOT / "qml"),
                    VERSION=version, ARCH="x86_64",
@@ -148,6 +202,8 @@ def main() -> None:
              *(argument for library in forced_libraries for argument in ("--library", str(library))),
              "--plugin", "qt"], env=env, cwd=work)
         set_wayland_plugin_runpaths(appdir, wayland_plugin_groups)
+        set_qml_plugin_runpaths(appdir)
+        multimedia = pin_multimedia_backend(appdir)
         # Explicit --library requests override linuxdeploy's default exclusion
         # list and retain its dependency and copyright-file deployment.
         for library in forced_libraries:
@@ -189,6 +245,11 @@ def main() -> None:
         if not jp2_library.is_file() or not jp2_plugin.is_file():
             raise RuntimeError("AppDir is missing the bundled JPEG 2000 reader")
         shutil.copy2(jp2_library, jp2_plugin.parent / jp2_library.name)
+        runtime_report = validate_runtime(appdir / "usr/qml", appdir / "usr/lib", qt_version)
+        runtime_report["multimedia_backend"] = multimedia
+        report_path = appdir / "usr/share/licasa/qt-runtime.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(runtime_report, indent=2) + "\n")
         built = work / f"Licasa-{version}-x86_64.AppImage"
         run([str(tools_dir / "appimagetool-x86_64.AppImage"), "--runtime-file",
              str(tools_dir / "runtime-x86_64"), str(appdir), str(built)],

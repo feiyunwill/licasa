@@ -18,5 +18,5 @@ RUN HOME=/tmp/licasa-install-test bash /opt/check_appimage_install.sh \
 USER 0:0
 # Graphical test tools are added only after the minimal runtime gates pass.
 RUN pacman -Syu --noconfirm --needed \
-       xorg-server-xvfb xorg-xwininfo weston desktop-file-utils xdg-utils \
+       xorg-server-xvfb xorg-xwininfo xorg-xprop openbox weston desktop-file-utils xdg-utils python \
     && pacman -Scc --noconfirm

@@ -24,7 +24,8 @@ QJsonObject processMetrics();
 void printJson(const QJsonObject& value);
 
 std::unique_ptr<DiagnosticCheck> makeRawBehaviorCheck(bool previewOnly, bool editOnly);
-std::unique_ptr<DiagnosticCheck> makeMotionPhotoControlsCheck();
+std::unique_ptr<DiagnosticCheck>
+makeMotionPhotoControlsCheck(const QString& frameOutput = QString());
 std::unique_ptr<DiagnosticCheck> makeViewerMeasurement(qint64 started, const QUrl& imageUrl,
                                                        int cycles);
 std::unique_ptr<DiagnosticCheck> makeNavigationTransitionCheck(const QUrl& nextImageUrl,

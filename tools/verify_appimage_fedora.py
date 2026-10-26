@@ -13,6 +13,9 @@ import tempfile
 
 from display_session_results import parse_display_graphics
 from verify_installed_release import SAMPLES
+from package_dialog_checks import run_dialog_checks
+from package_reader_checks import run_reader_checks
+from package_motion_checks import run_motion_checks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +58,7 @@ def main() -> None:
             "/opt/install-licasa-appimage.sh /opt/Licasa.AppImage\n"
             "USER 0:0\n"
             "RUN dnf install -y --setopt=install_weak_deps=False "
-            "desktop-file-utils xdg-utils xorg-x11-server-Xvfb xwininfo weston mesa-dri-drivers "
+            "desktop-file-utils xdg-utils xorg-x11-server-Xvfb xwininfo xprop openbox weston mesa-dri-drivers python3 "
             "&& dnf clean all\n")
         tag = "licasa-appimage-fedora-verify:local"
         subprocess.run(["docker", "build", "--tag", tag, str(work)], check=True)
@@ -113,6 +116,18 @@ def main() -> None:
                     raise RuntimeError(f"Fedora AppImage {name} failed:\n"
                                        f"{display.stdout}\n{display.stderr}")
                 displays[name] = parse_display_graphics(display.stdout, context=f"Fedora AppImage {name}")
+        readers = run_reader_checks(
+            tag, diagnostic="/tmp/squashfs-root/usr/bin/licasa_diagnostics",
+            runtime_root="/tmp/squashfs-root/usr/lib", output_dir=args.output.parent / "reader-artifacts",
+            setup="cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null;")
+        motion = run_motion_checks(
+            tag, diagnostic="/tmp/squashfs-root/usr/bin/licasa_diagnostics",
+            runtime_root="/tmp/squashfs-root/usr", output_dir=args.output.parent / "motion-artifacts",
+            setup="cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null;")
+        dialogs = run_dialog_checks(
+            tag, output_dir=args.output.parent / "dialog-artifacts", app="/tmp/squashfs-root/AppRun",
+            diagnostic="/tmp/squashfs-root/usr/bin/licasa_diagnostics", sample=sample,
+            setup="cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null;")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
         "fedora_version": 44,
@@ -124,6 +139,9 @@ def main() -> None:
         "jpeg_default_selected": True,
         "viewer_launched": True,
         "display_sessions": displays,
+        "dialog_interactions": dialogs,
+        "reader_smoke": readers,
+        "motion_photo": motion,
     }, indent=2) + "\n")
     print(f"Fedora 44 AppImage desktop installation passed: {args.output}")
 

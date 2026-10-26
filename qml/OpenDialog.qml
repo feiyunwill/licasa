@@ -6,13 +6,20 @@
 
 import QtQuick
 import QtQuick.Dialogs
+import "DialogRuntime.js" as DialogRuntime
 
 FileDialog {
     id: dialog
+    objectName: "openDialog"
 
     required property var formatSupport
 
     signal fileChosen(url fileUrl)
+    signal openFailed(string message)
+
+    function openSafely() {
+        return DialogRuntime.open(dialog)
+    }
 
     title: "Open image"
     fileMode: FileDialog.OpenFile

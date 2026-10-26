@@ -5,10 +5,10 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(Licasa
-        VERSION 0.8.0
+        VERSION 0.8.1
         LANGUAGES CXX
 )
-set(LICASA_RELEASE_DATE "2026-10-25")
+set(LICASA_RELEASE_DATE "2026-10-26")
 
 # Qt 6 requires C++17 or newer.
 set(CMAKE_CXX_STANDARD 17)
@@ -45,7 +45,7 @@ set(LICASA_QT_EXTRA_IMAGEFORMATS_DIR "" CACHE PATH
 set(LICASA_QT_EXTRA_IMAGEFORMATS_LICENSE "" CACHE FILEPATH
         "License file for bundled Qt TIFF and WebP plugins")
 set(LICASA_QT_FFMPEG_PLUGIN "" CACHE FILEPATH
-        "Qualified Qt 6.4.2 FFmpeg plugin with custom-input cleanup fixes")
+        "Qualified profile-matching FFmpeg plugin with custom-input cleanup fixes")
 set(LICASA_QT_QUICK_BACKPORT_LIBRARY "" CACHE FILEPATH
         "Same-version Qt Quick library with the software texture cleanup backport")
 set(LICASA_SANITIZER "" CACHE STRING "Development sanitizer: address, undefined, or address,undefined")
@@ -54,11 +54,13 @@ if(LICASA_SANITIZER AND NOT LICASA_SANITIZER MATCHES "^(address|undefined|addres
     message(FATAL_ERROR "Unsupported LICASA_SANITIZER")
 endif()
 
+include(cmake/LicasaRuntimeProfiles.cmake)
+
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickDialogs2)
 if(LICASA_ENABLE_MOTION_PLAYBACK)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Multimedia)
-    # Bounded QIODevice playback is qualified only against the patched private
-    # Qt 6.4.2 FFmpeg plugin. Never let a motion-enabled build silently fall
+    # Bounded QIODevice playback requires the patched private plugin for the
+    # exact selected Qt/runtime profile. Never let a motion-enabled build silently fall
     # back to the distro plugin, because that would invalidate teardown/leak
     # qualification while still appearing functionally correct.
     if(NOT LICASA_QT_FFMPEG_PLUGIN)
@@ -66,10 +68,11 @@ if(LICASA_ENABLE_MOTION_PLAYBACK)
                 "LICASA_ENABLE_MOTION_PLAYBACK requires the qualified private FFmpeg plugin; "
                 "build it with tools/build_qt_ffmpeg.py and set LICASA_QT_FFMPEG_PLUGIN")
     endif()
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT Qt6_VERSION VERSION_EQUAL "6.4.2"
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT Qt6_VERSION VERSION_EQUAL LICASA_RUNTIME_QT_VERSION
             OR NOT EXISTS "${LICASA_QT_FFMPEG_PLUGIN}")
-        message(FATAL_ERROR "The private FFmpeg plugin requires Linux Qt 6.4.2 and an existing plugin")
+        message(FATAL_ERROR "The private FFmpeg plugin requires Linux Qt ${LICASA_RUNTIME_QT_VERSION} for ${LICASA_RUNTIME_PROFILE} and an existing plugin")
     endif()
+    licasa_verify_ffmpeg_runtime("${LICASA_QT_FFMPEG_PLUGIN}")
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins/multimedia")
     configure_file("${LICASA_QT_FFMPEG_PLUGIN}"
             "${CMAKE_CURRENT_BINARY_DIR}/plugins/multimedia/libffmpegmediaplugin.so" COPYONLY)
@@ -80,6 +83,9 @@ if(LICASA_ENABLE_MOTION_PLAYBACK)
             DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/licasa/qt-multimedia")
 endif()
 if(LICASA_QT_QUICK_BACKPORT_LIBRARY)
+    if(NOT LICASA_RUNTIME_PROFILE STREQUAL "ubuntu-6.4.2")
+        message(FATAL_ERROR "The selected runtime profile uses the audited distro Qt Quick; no private backport is qualified")
+    endif()
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT Qt6_VERSION VERSION_EQUAL "6.4.2")
         message(FATAL_ERROR "The recorded Qt Quick backport is for Linux Qt 6.4.2 only")
     endif()
@@ -93,6 +99,7 @@ if(LICASA_QT_QUICK_BACKPORT_LIBRARY)
     endif()
     get_filename_component(LICASA_QT_QUICK_BACKPORT_DIR
             "${LICASA_QT_QUICK_BACKPORT_LIBRARY}" DIRECTORY)
+    licasa_verify_quick_runtime("${LICASA_QT_QUICK_BACKPORT_LIBRARY}")
     # Qt::QuickTest only references Quick indirectly. Relink that dependency
     # explicitly below so the executable's own RUNPATH selects the same runtime.
     set(CMAKE_BUILD_RPATH "${LICASA_QT_QUICK_BACKPORT_DIR}")
@@ -624,6 +631,7 @@ function(licasa_add_qml target_name)
             src/media/motion/motion_photo_frame_surface.h
             RESOURCES
             qml/ViewerMath.js
+            qml/DialogRuntime.js
             qml/FileUrls.js
             qml/MotionPhotoFrameSurfaceHost.qml
             assets/icons/settings.svg

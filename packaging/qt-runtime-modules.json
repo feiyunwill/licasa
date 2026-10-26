@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "qt_versions": [
+    "6.4.2",
+    "6.8.2"
+  ],
+  "additional_packages": [],
+  "modules": [
+    {
+      "uri": "QtQml",
+      "package": "qml6-module-qtqml",
+      "deploy_explicitly": true,
+      "plugins": {
+        "6.4.2": [
+          "qmlplugin"
+        ],
+        "6.8.2": [
+          "qmlplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQml.Models",
+      "package": "qml6-module-qtqml-models",
+      "plugins": {
+        "6.4.2": [
+          "modelsplugin"
+        ],
+        "6.8.2": [
+          "modelsplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQml.WorkerScript",
+      "package": "qml6-module-qtqml-workerscript",
+      "plugins": {
+        "6.4.2": [
+          "workerscriptplugin"
+        ],
+        "6.8.2": [
+          "workerscriptplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick",
+      "package": "qml6-module-qtquick",
+      "plugins": {
+        "6.4.2": [
+          "qtquick2plugin"
+        ],
+        "6.8.2": [
+          "qtquick2plugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Controls",
+      "package": "qml6-module-qtquick-controls",
+      "plugins": {
+        "6.4.2": [
+          "qtquickcontrols2plugin"
+        ],
+        "6.8.2": [
+          "qtquickcontrols2plugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Controls.impl",
+      "package": "qml6-module-qtquick-controls",
+      "plugins": {
+        "6.4.2": [
+          "qtquickcontrols2implplugin"
+        ],
+        "6.8.2": [
+          "qtquickcontrols2implplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Controls.Basic",
+      "package": "qml6-module-qtquick-controls",
+      "deploy_explicitly": true,
+      "plugins": {
+        "6.4.2": [
+          "qtquickcontrols2basicstyleplugin"
+        ],
+        "6.8.2": [
+          "qtquickcontrols2basicstyleplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Controls.Basic.impl",
+      "package": "qml6-module-qtquick-controls",
+      "deploy_explicitly": true,
+      "plugins": {
+        "6.4.2": [
+          "qtquickcontrols2basicstyleimplplugin"
+        ],
+        "6.8.2": [
+          "qtquickcontrols2basicstyleimplplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Dialogs",
+      "package": "qml6-module-qtquick-dialogs",
+      "plugins": {
+        "6.4.2": [
+          "qtquickdialogsplugin"
+        ],
+        "6.8.2": [
+          "qtquickdialogsplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Dialogs.quickimpl",
+      "package": "qml6-module-qtquick-dialogs",
+      "plugins": {
+        "6.4.2": [
+          "qtquickdialogs2quickimplplugin"
+        ],
+        "6.8.2": [
+          "qtquickdialogs2quickimplplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Layouts",
+      "package": "qml6-module-qtquick-layouts",
+      "plugins": {
+        "6.4.2": [
+          "qquicklayoutsplugin"
+        ],
+        "6.8.2": [
+          "qquicklayoutsplugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Templates",
+      "package": "qml6-module-qtquick-templates",
+      "plugins": {
+        "6.4.2": [
+          "qtquicktemplates2plugin"
+        ],
+        "6.8.2": [
+          "qtquicktemplates2plugin"
+        ]
+      }
+    },
+    {
+      "uri": "QtQuick.Window",
+      "package": "qml6-module-qtquick-window",
+      "plugins": {
+        "6.4.2": [
+          "quickwindowplugin"
+        ],
+        "6.8.2": [
+          "quickwindowplugin"
+        ]
+      }
+    },
+    {
+      "uri": "Qt.labs.folderlistmodel",
+      "package": "qml6-module-qt-labs-folderlistmodel",
+      "deploy_explicitly": true,
+      "libraries": [
+        "libQt6LabsFolderListModel.so.6"
+      ],
+      "plugins": {
+        "6.4.2": [
+          "qmlfolderlistmodelplugin"
+        ],
+        "6.8.2": [
+          "qmlfolderlistmodelplugin"
+        ]
+      }
+    }
+  ]
+}

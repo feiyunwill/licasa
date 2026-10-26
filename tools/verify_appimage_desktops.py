@@ -13,6 +13,8 @@ import tempfile
 
 from display_session_results import parse_display_graphics
 from verify_installed_release import SAMPLES
+from package_dialog_checks import run_dialog_checks
+from package_motion_checks import run_motion_checks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,12 +139,21 @@ def main() -> None:
     print("Arch: all packaged ELF dependencies resolved", flush=True)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    dialogs = run_dialog_checks(
+        IMAGE, output_dir=args.output.parent / "dialog-artifacts", app="/tmp/squashfs-root/AppRun",
+        diagnostic="/tmp/squashfs-root/usr/bin/licasa_diagnostics", sample=sample,
+        setup="cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null;")
     args.output.write_text(json.dumps({
         "appimage_sha256": hashlib.sha256(appimage.read_bytes()).hexdigest(),
         "test_image": IMAGE,
         "runtime_checked_before_desktop_tools": True,
         "appimage_lifecycle_checked_before_desktop_tools": True,
         "checks": checks,
+        "dialog_interactions": dialogs,
+        "motion_photo": run_motion_checks(
+            IMAGE, diagnostic="/tmp/squashfs-root/usr/bin/licasa_diagnostics",
+            runtime_root="/tmp/squashfs-root/usr", output_dir=args.output.parent / "motion-artifacts",
+            setup="cd /tmp; /opt/Licasa.AppImage --appimage-extract >/dev/null;"),
     }, indent=2) + "\n")
     print(f"Arch desktop checks passed: {args.output}")
 

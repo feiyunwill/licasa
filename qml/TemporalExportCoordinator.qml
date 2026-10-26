@@ -12,6 +12,39 @@ Item {
     required property var motionExportService
     required property var animationExportService
 
+    readonly property bool dialogVisible: Boolean(
+        (motionExportDialogLoader.dialog && motionExportDialogLoader.dialog.visible)
+        || (animationExportDialogLoader.dialog && animationExportDialogLoader.dialog.visible))
+
+    signal dialogFailed(string message)
+    signal dialogClosed()
+
+    function resetFailedDialog(loader: Loader) {
+        if (loader.status !== Loader.Error)
+            return
+        dialogFailed("The export picker could not be loaded. Check the installation and try again.")
+        failedDialogResetTimer.pendingLoaders = failedDialogResetTimer.pendingLoaders.concat([loader])
+        failedDialogResetTimer.restart()
+    }
+
+    Timer {
+        id: failedDialogResetTimer
+        property var pendingLoaders: []
+        interval: 0
+        repeat: false
+        onTriggered: {
+            const failed = pendingLoaders
+            pendingLoaders = []
+            for (let index = 0; index < failed.length; ++index) {
+                const loader = failed[index]
+                if (loader && loader.status === Loader.Error) {
+                    loader.active = false
+                    loader.source = ""
+                }
+            }
+        }
+    }
+
     visible: false
 
     function suggestedMotionExportUrl() {
@@ -52,7 +85,7 @@ Item {
         if (motionExportDialogLoader.dialog) {
             motionExportDialogLoader.dialog.suggestedFile = suggestion
             motionExportDialogLoader.dialog.suggestedSuffix = suffix
-            motionExportDialogLoader.dialog.open()
+            motionExportDialogLoader.dialog.openSafely()
             return
         }
 
@@ -110,7 +143,7 @@ Item {
         if (animationExportDialogLoader.dialog) {
             animationExportDialogLoader.dialog.suggestedFile = suggestion
             animationExportDialogLoader.dialog.suggestedSuffix = suffix
-            animationExportDialogLoader.dialog.open()
+            animationExportDialogLoader.dialog.openSafely()
             return
         }
 
@@ -164,6 +197,8 @@ Item {
 
     Loader {
         id: motionExportDialogLoader
+        objectName: "motionExportDialogLoader"
+        onStatusChanged: coordinator.resetFailedDialog(motionExportDialogLoader)
         readonly property var dialog: item
         active: false
         asynchronous: true
@@ -171,13 +206,18 @@ Item {
         onLoaded: {
             if (dialog) {
                 dialog.fileChosen.connect(coordinator.exportMotionCopy)
-                dialog.open()
+                dialog.openFailed.connect(coordinator.dialogFailed)
+                dialog.accepted.connect(coordinator.dialogClosed)
+                dialog.rejected.connect(coordinator.dialogClosed)
+                dialog.openSafely()
             }
         }
     }
 
     Loader {
         id: animationExportDialogLoader
+        objectName: "animationExportDialogLoader"
+        onStatusChanged: coordinator.resetFailedDialog(animationExportDialogLoader)
         readonly property var dialog: item
         active: false
         asynchronous: true
@@ -185,7 +225,10 @@ Item {
         onLoaded: {
             if (dialog) {
                 dialog.fileChosen.connect(coordinator.exportAnimationCopy)
-                dialog.open()
+                dialog.openFailed.connect(coordinator.dialogFailed)
+                dialog.accepted.connect(coordinator.dialogClosed)
+                dialog.rejected.connect(coordinator.dialogClosed)
+                dialog.openSafely()
             }
         }
     }

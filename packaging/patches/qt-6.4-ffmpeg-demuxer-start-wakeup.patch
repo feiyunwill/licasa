@@ -1,0 +1,13 @@
+--- a/src/plugins/multimedia/ffmpeg/qffmpegdecoder_p.h
++++ b/src/plugins/multimedia/ffmpeg/qffmpegdecoder_p.h
+@@ -239,6 +239,10 @@
+     }
+     void startDecoding()
+     {
++        // Pair the stopped predicate transition with Thread::maybePause's
++        // condition wait. Otherwise play() can wake between shouldWait()
++        // and wait(), leaving a runnable demuxer asleep indefinitely.
++        QMutexLocker locker(&mutex);
+         m_isStopped.storeRelaxed(false);
+         updateEnabledStreams();
+         wake();

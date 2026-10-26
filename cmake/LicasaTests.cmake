@@ -445,6 +445,40 @@ if(LICASA_ENABLE_HEIF)
             TIMEOUT 90 LABELS "codec;heif;security")
 endif()
 
+add_executable(licasa_accessibility_tests tests/tst_accessibility_controls.cpp)
+target_link_libraries(licasa_accessibility_tests PRIVATE Qt6::Quick Qt6::Qml Qt6::Test)
+target_compile_definitions(licasa_accessibility_tests PRIVATE
+        LICASA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+licasa_enable_warnings(licasa_accessibility_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_accessibility_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_accessibility_tests)
+add_test(NAME licasa_accessibility_controls COMMAND licasa_accessibility_tests -platform offscreen)
+set_tests_properties(licasa_accessibility_controls PROPERTIES
+        TIMEOUT 15 LABELS "core;qml;accessibility;fast" ENVIRONMENT "QT_QUICK_BACKEND=software")
+
+# FileDialog failures live in native Qt code, beyond Loader.Error. Exercise
+# the shipped QML wrappers in a clean engine and a deliberately incomplete
+# import tree in separate processes before qualification can pass.
+add_executable(licasa_file_dialog_tests tests/tst_file_dialog_runtime.cpp)
+target_link_libraries(licasa_file_dialog_tests PRIVATE Qt6::Quick Qt6::Qml Qt6::Test)
+get_target_property(LICASA_TEST_QMAKE Qt6::qmake IMPORTED_LOCATION)
+execute_process(COMMAND "${LICASA_TEST_QMAKE}" -query QT_INSTALL_QML
+        OUTPUT_VARIABLE LICASA_TEST_QML_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND_ERROR_IS_FATAL ANY)
+target_compile_definitions(licasa_file_dialog_tests PRIVATE
+        LICASA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        LICASA_TEST_QML_ROOT="${LICASA_TEST_QML_ROOT}")
+licasa_enable_warnings(licasa_file_dialog_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_file_dialog_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_file_dialog_tests)
+add_test(NAME licasa_file_dialog_runtime COMMAND licasa_file_dialog_tests -platform offscreen)
+add_test(NAME licasa_file_dialog_missing_module COMMAND licasa_file_dialog_tests -platform offscreen)
+set_tests_properties(licasa_file_dialog_runtime licasa_file_dialog_missing_module PROPERTIES
+        TIMEOUT 30 LABELS "core;qml;dialogs;packaging"
+        ENVIRONMENT "QT_QUICK_BACKEND=software")
+set_property(TEST licasa_file_dialog_missing_module APPEND PROPERTY ENVIRONMENT
+        "LICASA_TEST_MISSING_DIALOG_MODULE=1")
+
 add_executable(licasa_qml_tests
         tests/quicktest_main.cpp
         src/imaging/codec_plugins.cpp
@@ -653,6 +687,23 @@ set_tests_properties(licasa_image_save_tests PROPERTIES
         TIMEOUT 60 LABELS "core;policy;fast")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    foreach(runtime_contract_test IN ITEMS runtime_profiles qt_runtime)
+        add_test(NAME licasa_${runtime_contract_test}_contract
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_${runtime_contract_test}.py)
+        set_tests_properties(licasa_${runtime_contract_test}_contract PROPERTIES
+                TIMEOUT 30 LABELS "packaging;runtime-profile;fast")
+    endforeach()
+    foreach(package_check IN ITEMS reader motion)
+        add_test(NAME licasa_package_${package_check}_checks
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_package_${package_check}_checks.py)
+        set_tests_properties(licasa_package_${package_check}_checks PROPERTIES
+                TIMEOUT 30 LABELS "packaging;${package_check};fast")
+    endforeach()
+    set_property(TEST licasa_package_motion_checks APPEND PROPERTY LABELS "motion-photo")
+    add_test(NAME licasa_mate_accessibility_wrapper
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mate_accessibility_wrapper.py)
+    set_tests_properties(licasa_mate_accessibility_wrapper PROPERTIES
+            TIMEOUT 30 LABELS "packaging;accessibility;fast")
     add_test(NAME licasa_release_hardening
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_hardening.py
             $<TARGET_FILE:licasa>)
@@ -730,6 +781,19 @@ if(LICASA_SANITIZER MATCHES "address" AND Qt6_VERSION VERSION_LESS "6.8.0"
                     "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan-qt-software.supp:print_suppressions=1")
         endif()
     endforeach()
+endif()
+
+if(LICASA_ENABLE_MOTION_PLAYBACK)
+    add_executable(licasa_qt_custom_input_tests tests/tst_qt_custom_input.cpp)
+    target_link_libraries(licasa_qt_custom_input_tests PRIVATE Qt6::Gui Qt6::Multimedia Qt6::Test)
+    target_compile_definitions(licasa_qt_custom_input_tests PRIVATE
+            LICASA_TEST_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test-assets")
+    licasa_enable_warnings(licasa_qt_custom_input_tests)
+    list(APPEND LICASA_TEST_TARGETS licasa_qt_custom_input_tests)
+    add_test(NAME licasa_qt_custom_input_tests COMMAND licasa_qt_custom_input_tests -platform offscreen)
+    set_tests_properties(licasa_qt_custom_input_tests PROPERTIES
+            TIMEOUT 150 LABELS "motion-photo;runtime-profile;lifecycle;security"
+            ENVIRONMENT "QT_MEDIA_BACKEND=ffmpeg;QT_FFMPEG_DECODING_HW_DEVICE_TYPES=,;QT_QPA_PLATFORM=offscreen")
 endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/LicasaTemporalTests.cmake)

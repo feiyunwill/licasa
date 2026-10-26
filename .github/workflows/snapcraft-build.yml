@@ -53,6 +53,9 @@ jobs:
           /usr/bin/python3 -B tests/test_installation_qualification.py -v
           /usr/bin/python3 -B tests/test_graphics_qualification.py -v
           /usr/bin/python3 -B tests/test_physical_graphics_qualification.py -v
+          /usr/bin/python3 -B tests/test_support_contract.py -v
+          /usr/bin/python3 -B tests/test_qualification_evidence.py -v
+          python3 tools/check_support_manifest.py
           bash -n packaging/install-licasa-appimage.sh
           bash -n tools/check_appimage_install.sh
 
@@ -93,7 +96,7 @@ jobs:
             build/release-dependencies/codecs
             build/release-dependencies/quick
             build/release-dependencies/ffmpeg
-          key: ubuntu-release-deps-v2-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'tools/build_ubuntu_deb.py', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', 'packaging/verify-fresh-build.sh') }}
+          key: ubuntu-release-deps-v2-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'packaging/qt-runtime-modules.json', 'cmake/LicasaRuntimeProfiles.cmake', 'tools/build_qt_ffmpeg.py', 'tools/verify_qt_ffmpeg_wakeup.py', 'tools/build_ubuntu_deb.py', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', 'packaging/verify-fresh-build.sh') }}
       - name: Build and test from a clean Ubuntu 24.04 image
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
@@ -184,7 +187,48 @@ jobs:
           path: dist/
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 90
+
+  build_debian:
+    # This target is built wholly in Debian; never reuse the Ubuntu private ABI.
+    needs: [preflight, verify_sanitizers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Build the Debian 13 native environment
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          docker build --pull -f packaging/build-debian.Dockerfile -t licasa-debian13-builder packaging
+      - name: Build and test a fresh Debian source copy
+        run: |
+          mkdir -p build/qualification/debian13
+          docker run --rm -v "$PWD:/source:ro" \
+            -v "$PWD/build/qualification/debian13:/output" \
+            licasa-debian13-builder bash -ec '
+              set -o pipefail
+              mkdir -p /work/licasa
+              tar -C /source --exclude="./build*" --exclude="./cmake-build-*" \
+                --exclude="./.git" --exclude="./.idea" --exclude="./private-validation" \
+                --exclude="./CMakeUserPresets.json" -cf - . | tar -C /work/licasa -xf -
+              cd /work/licasa
+              python3 tools/build_debian_deb.py --jobs 3 --output-dir /output'
+      - name: Qualify installation and dialogs against Debian libraries
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          python3 tools/verify_deb_container.py \
+            "build/qualification/debian13/licasa_${VERSION}-1+deb13_amd64.deb" \
+            --target debian-13 --output build/qualification/debian13/install-smoke.json
+          git rev-parse HEAD > build/qualification/debian13/source-commit.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: licasa-debian13-amd64
+          path: build/qualification/debian13/
+          if-no-files-found: error
+          retention-days: 90
 
   build_snap:
     # Repackage the exact Ubuntu payload after its full build/test/install gates.
@@ -237,7 +281,7 @@ jobs:
           path: dist/snap/
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 90
 
   upload_snap_edge:
     needs: [preflight, build_snap, build_and_test]
@@ -302,7 +346,7 @@ jobs:
           if-no-files-found: error
 
   github_prerelease:
-    needs: [preflight, build_snap, build_and_test, upload_snap_edge]
+    needs: [preflight, build_snap, build_and_test, build_debian, upload_snap_edge]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -321,12 +365,17 @@ jobs:
         with:
           name: licasa-snap-amd64
           path: dist/snap
+      - uses: actions/download-artifact@v8
+        with:
+          name: licasa-debian13-amd64
+          path: dist/debian13
       - name: Recheck package versions and hashes
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           python3 tools/check_release_version.py \
             --channel stable --expected-sha "$GITHUB_SHA" --source-ref "$GITHUB_REF"
+          (cd dist/debian13 && sha256sum --check "licasa_${VERSION}-1+deb13_amd64.deb.sha256")
           (cd dist/deb && sha256sum --check "licasa_${VERSION}-1_amd64.deb.sha256")
           test "$(dpkg-deb --field "dist/deb/licasa_${VERSION}-1_amd64.deb" Version)" = "${VERSION}-1"
           (cd dist/appimage && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256")
@@ -351,6 +400,7 @@ jobs:
             printf 'Preview release: the checked Snap is on Store edge as revision %s. Stable follows qualification.\n\n' "$SNAP_REVISION"
             cat "packaging/release-notes/$RELEASE_TAG.md"
             printf "\n### Package SHA-256 checksums\n\n\`\`\`text\n"
+            cat "dist/debian13/licasa_${VERSION}-1+deb13_amd64.deb.sha256"
             cat "dist/deb/licasa_${VERSION}-1_amd64.deb.sha256"
             cat "dist/appimage/Licasa-${VERSION}-x86_64.AppImage.sha256"
             cat "dist/appimage/install-licasa-appimage.sh.sha256"
@@ -362,6 +412,8 @@ jobs:
             printf "\nSource commit: \`%s\`.\n" "$GITHUB_SHA"
           } > dist/release-notes.md
           gh release create "$RELEASE_TAG" \
+            "dist/debian13/licasa_${VERSION}-1+deb13_amd64.deb" \
+            "dist/debian13/licasa_${VERSION}-1+deb13_amd64.deb.sha256" \
             "dist/deb/licasa_${VERSION}-1_amd64.deb" \
             "dist/deb/licasa_${VERSION}-1_amd64.deb.sha256" \
             "dist/appimage/Licasa-${VERSION}-x86_64.AppImage" \

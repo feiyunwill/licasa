@@ -9,10 +9,78 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
+from types import SimpleNamespace
+
+from check_linux_session import require_disposable_vm
+from package_motion_checks import installed_check, make_fixture
 
 
 PHOTO_COLORS = ((238, 32, 32), (32, 220, 32), (32, 64, 238), (238, 210, 32))
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def confined_dialog_wrappers(output):
+    """Keep both application and production-QML diagnostics inside Snap confinement."""
+    app = output / "confined-licasa.sh"
+    diagnostic = output / "confined-diagnostics.sh"
+    app.write_text('#!/bin/sh\nexec snap run licasa "$@"\n')
+    diagnostic.write_text(
+        '#!/bin/sh\nexec snap run --shell licasa -c '
+        # --shell bypasses the app command-chain. Restore the normal graphics
+        # and desktop setup, including the private runtime Wayland socket link.
+        '\'exec "$SNAP/snap/command-chain/gpu-2404-wrapper" '
+        '"$SNAP/snap/command-chain/desktop-launch" '
+        '"$SNAP/usr/bin/licasa_diagnostics" "$@"\' _ "$@"\n')
+    for wrapper in (app, diagnostic):
+        wrapper.chmod(0o755)
+    return app, diagnostic
+
+
+def check_dialog_interactions(output, picture, environment, *, protocol, mode):
+    app, diagnostic = confined_dialog_wrappers(output)
+    destination = output / f"{protocol}-{mode}-dialogs.json"
+    command = [sys.executable, str(ROOT / "tools/verify_dialog_interactions.py"),
+               "--app", str(app), "--diagnostic", str(diagnostic), "--sample", str(picture),
+               "--output", str(destination), "--protocol", protocol, "--mode", mode,
+               "--dialog-backend", "fallback", "--work-directory", str(output),
+               "--preserve-desktop-runtime"]
+    with (output / f"{protocol}-{mode}-dialogs.log").open("w") as log:
+        result = subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT,
+                                timeout=240, check=False)
+    if result.returncode:
+        raise RuntimeError(f"Confined Snap dialog interactions failed for {protocol}/{mode}")
+    report = json.loads(destination.read_text())
+    if (report.get("status") != "passed" or report.get("protocol") != protocol
+            or report.get("mode") != mode or report.get("dialog_backend") != "fallback"):
+        raise RuntimeError("Snap dialog harness did not produce a matching passed report")
+    report["confinement"] = "normal_snap_launcher_and_snap_run_shell"
+    return report
+
+
+def check_motion_interactions(output, environment, runtime_root, *, protocol, mode):
+    """Exercise packaged playback through the confined production diagnostic launcher."""
+    _, diagnostic = confined_dialog_wrappers(output)
+    cases = []
+    for rotation in (0, 90):
+        artifacts = output / f"{protocol}-{mode}-motion-{rotation}"
+        artifacts.mkdir()
+        fixture = artifacts / "motion-photo.jpg"
+        metadata = make_fixture(fixture, rotation)
+        arguments = SimpleNamespace(output=artifacts / "report.json", diagnostic=diagnostic,
+            fixture=fixture, runtime_root=runtime_root, qt_version="6.4.2", protocol=protocol,
+            mode=mode, rotation_degrees=rotation)
+        report = installed_check(arguments, environment=environment)
+        if (report.get("status") != "passed" or report.get("protocol") != protocol
+                or report.get("mode") != mode or report.get("rotation_degrees") != rotation
+                or report.get("qt_version") != "6.4.2"):
+            raise RuntimeError("Confined Snap Motion evidence has a mismatched session identity")
+        report["fixture"] = metadata
+        report["artifacts_directory"] = str(artifacts)
+        report["confinement"] = "snap_run_shell"
+        cases.append(report)
+    return cases
 
 
 def pattern_present(image):
@@ -94,6 +162,15 @@ def close_snap(app, environment):
                 pass
 
 
+def wayland_socket(runtime):
+    # Snap's wayland interface permits /run/user/<uid>/wayland-[0-9]*.
+    # A custom prefix works unconfined but is denied inside the normal launcher.
+    name = "wayland-93"
+    if (runtime / name).exists() or (runtime / (name + ".lock")).exists():
+        raise RuntimeError("Refusing to reuse an existing Wayland socket or lock")
+    return name
+
+
 def bus_owner(name, environment):
     result = subprocess.run(
         ["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
@@ -102,6 +179,68 @@ def bus_owner(name, environment):
         env=environment, capture_output=True, text=True, timeout=5,
     )
     return result.returncode == 0 and "true" in result.stdout
+
+
+def configure_bus_desktop(environment, socket):
+    # The runner's pre-existing user bus predates our virtual display. Services
+    # activated by Plasma otherwise inherit no DISPLAY and abort in Qt startup.
+    activation = dict(environment, WAYLAND_DISPLAY=socket or "",
+                      QT_QPA_PLATFORM="wayland" if socket else "xcb")
+    subprocess.run(["dbus-update-activation-environment", "DISPLAY", "XDG_RUNTIME_DIR",
+                    "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "QT_QPA_PLATFORM", "WAYLAND_DISPLAY"],
+                   env=activation, check=True, capture_output=True, timeout=10)
+
+
+def leave_gnome_overview(environment, processes=(), timeout=30, startup_log=None):
+    # A fresh GNOME session starts in Overview. Its window previews can show
+    # the photo while native keyboard focus remains with the shell. Use the
+    # public shell property to enter the desktop before exercising app focus.
+    command = ["gdbus", "call", "--session", "--dest", "org.gnome.Shell",
+               "--object-path", "/org/gnome/Shell", "--method"]
+    deadline = time.monotonic() + timeout
+    last_reply = "no D-Bus reply"
+    requested = False
+
+    def call(method, *arguments):
+        nonlocal last_reply
+        try:
+            result = subprocess.run([*command, "org.freedesktop.DBus.Properties." + method,
+                                    "org.gnome.Shell", "OverviewActive", *arguments],
+                                   env=environment, capture_output=True, text=True,
+                                   timeout=min(5, max(0.1, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"GNOME Overview {method} call timed out; last D-Bus reply: {last_reply}") from error
+        last_reply = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+        if result.returncode:
+            # Mutter owns the bus name before GNOME's JavaScript exports this
+            # object. NameHasOwner therefore cannot establish API readiness.
+            if ("org.freedesktop.DBus.Error.UnknownMethod" in result.stderr
+                    and "Object does not exist at path" in result.stderr
+                    and "/org/gnome/Shell" in result.stderr):
+                return None
+            raise RuntimeError(f"GNOME Overview {method} failed: {last_reply}")
+        return result.stdout.strip()
+
+    while time.monotonic() < deadline:
+        if any(process.poll() is not None for process in processes):
+            raise RuntimeError(f"GNOME shell exited while preparing Overview; last D-Bus reply: {last_reply}")
+        # GNOME logs this from layoutManager's startup-complete signal. Before
+        # then, its startup animation can show Overview after a successful hide.
+        if startup_log is not None and "GNOME Shell started at " not in startup_log.read_text():
+            last_reply = f"waiting for GNOME startup-complete in {startup_log}"
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+            continue
+        state = call("Get")
+        if state is not None:
+            match = re.fullmatch(r"\(\s*<(true|false)>\s*,\s*\)", state)
+            if not match:
+                raise RuntimeError(f"Unexpected GNOME Overview state: {state}")
+            if requested and match[1] == "false":
+                return
+            if not requested or match[1] == "true":
+                requested = call("Set", "<false>") is not None
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    raise RuntimeError(f"Timed out preparing GNOME Overview; last D-Bus reply: {last_reply}")
 
 
 def screenshot(display, destination):
@@ -141,8 +280,13 @@ def qualify(args):
     report = {
         "desktop": args.desktop, "snap_version": args.version, "snap_revision": listed[1].split()[2],
         "package_source_commit": source, "cpu_model": cpu_model.group(1) if cpu_model else "unknown",
-        "display_environment": "nested_desktop_on_hosted_vm",
-        "physical_gpu_coverage": "not_tested", "cases": {},
+        "display_environment": ("nested_desktop_on_disposable_vm" if getattr(args, "disposable_vm", False)
+                                else "nested_desktop_on_hosted_vm"),
+        "physical_gpu_coverage": "not_tested", "cases": {}, "dialog_interactions": [],
+        "motion_photo": {"status": "pending", "qt_version": "6.4.2",
+            "runtime_root": str(Path("/snap/licasa/current").resolve(strict=True) / "usr"), "cases": [],
+            "coverage_limits": ["Software FFmpeg decoding on nested virtual desktops; physical GPU decoding is separate.",
+                "Pinned modern Android Motion fixtures exercise bounded custom QIODevice input."]},
     }
     connections = subprocess.check_output(["snap", "connections", "licasa"], text=True)
     (output / "snap-connections.txt").write_text(connections)
@@ -200,9 +344,8 @@ def qualify(args):
             processes = []
             session_env = dict(environment)
             session_env["XDG_SESSION_TYPE"] = protocol
-            socket = f"licasa-{args.desktop}-{os.getpid()}"
-            if (runtime / socket).exists():
-                raise RuntimeError("Refusing to reuse an existing Wayland socket")
+            socket = wayland_socket(runtime) if protocol == "wayland" else None
+            configure_bus_desktop(session_env, socket)
             try:
                 if args.desktop == "gnome":
                     command = ["gnome-shell", "--x11"] if protocol == "x11" else [
@@ -226,6 +369,8 @@ def qualify(args):
                     session_env["WAYLAND_DISPLAY"] = socket
                 wait_until(lambda: bus_owner(owner, session_env), "desktop shell", processes)
                 for mode in ("default", "software"):
+                    if args.desktop == "gnome":
+                        leave_gnome_overview(session_env, processes, startup_log=output / f"{protocol}-gnome.log")
                     case = f"{protocol}-{mode}"
                     app_env = dict(session_env, QT_QPA_PLATFORM="xcb" if protocol == "x11" else "wayland")
                     if mode == "software":
@@ -250,11 +395,24 @@ def qualify(args):
                                                  "software_retry": "retrying once with the Qt software renderer" in log,
                                                  "normal_snap_launcher": True}
                         print(f"{args.desktop} {case}: normal Snap launch presented the photo", flush=True)
-                    finally:
+                    except BaseException:
+                        # Preserve the launch failure even when --quit also
+                        # fails because the same display connection is denied.
+                        try:
+                            close_snap(app, app_env)
+                        except Exception as error:
+                            (output / f"{case}-cleanup.log").write_text(str(error) + "\n")
+                        raise
+                    else:
                         close_snap(app, app_env)
+                    report["dialog_interactions"].append(check_dialog_interactions(
+                        output, picture, app_env, protocol=protocol, mode=mode))
+                    report["motion_photo"]["cases"].extend(check_motion_interactions(
+                        output, app_env, report["motion_photo"]["runtime_root"], protocol=protocol, mode=mode))
             finally:
                 for process in reversed(processes):
                     stop(process)
+        report["motion_photo"]["status"] = "passed"
         report["status"] = "passed_nested_desktop_checks"
     except Exception as error:
         report["status"] = "failed"
@@ -273,8 +431,12 @@ def main():
     parser.add_argument("--desktop", choices=("gnome", "kde"), required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--disposable-vm", action="store_true",
+                        help="Require a marked non-root QEMU/KVM guest instead of a GitHub-hosted runner")
     args = parser.parse_args()
-    if (os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    if args.disposable_vm:
+        require_disposable_vm()
+    elif (os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
             or os.environ.get("GITHUB_ACTIONS") != "true"):
         parser.error("Desktop checks may run only on a disposable GitHub-hosted VM")
     qualify(args)

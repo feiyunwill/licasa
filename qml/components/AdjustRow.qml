@@ -46,16 +46,23 @@ Item {
     height: 48
     activeFocusOnTab: true
 
+    // Qt's accessibility value interface reads these conventional properties.
+    readonly property real minimumValue: from
+    readonly property real maximumValue: to
+    readonly property real stepSize: keyboardStep
+
     Accessible.role: Accessible.Slider
     Accessible.name: label
     Accessible.description: displayText(value)
     Accessible.focusable: true
     Accessible.focused: activeFocus
+    Accessible.onIncreaseAction: root.commitValue(root.value + root.keyboardStep)
+    Accessible.onDecreaseAction: root.commitValue(root.value - root.keyboardStep)
 
     Keys.onPressed: function(event) {
-        if (event.key === Qt.Key_Left)
+        if (event.key === Qt.Key_Left || event.key === Qt.Key_Down)
             commitValue(value - keyboardStep)
-        else if (event.key === Qt.Key_Right)
+        else if (event.key === Qt.Key_Right || event.key === Qt.Key_Up)
             commitValue(value + keyboardStep)
         else if (event.key === Qt.Key_Home)
             commitValue(defaultValue)

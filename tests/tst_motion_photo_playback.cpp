@@ -485,6 +485,95 @@ class MotionPhotoPlaybackTest final : public QObject {
         }
     }
 
+    void pausedPreviewRemainsStableAcrossDelayedPresentation_data()
+    {
+        portableBoundedPlayback_data();
+    }
+
+    void pausedPreviewRemainsStableAcrossDelayedPresentation()
+    {
+        QFETCH(QString, name);
+        QFETCH(QSize, displaySize);
+        const QString path = QStringLiteral(LICASA_TEST_ASSET_DIR "/modern/motion/") + name;
+        QVERIFY(QFileInfo(path).isFile());
+        PhotoAssetInfo asset;
+        asset.kind = PhotoAssetKind::MotionPhoto;
+        asset.sourceUrl = QUrl::fromLocalFile(path);
+        asset.motion =
+            MotionComponent{{0, quint64(QFileInfo(path).size())}, QStringLiteral("video/mp4"), {}};
+        ViewerPreferences preferences;
+        preferences.setMaximumImageMegapixels(25);
+        ImageResourcePolicy policy(preferences);
+        MotionPhotoPlayback playback(policy);
+        MotionPhotoFrameRaster latest;
+        MotionPhotoFrameRaster requestedPreview;
+        bool delayPreview = false;
+        bool delayed = false;
+        playback.setFrameReadyCallback([&](auto frame) {
+            latest = std::move(frame);
+            if (delayPreview && !delayed && latest.timestampUs >= 1000000) {
+                delayed = true;
+                requestedPreview = latest;
+                // Hold the GUI exactly inside target-frame publication, before
+                // the backend's queued callback returns to pause the decoder.
+                // Decoder threads continue running: late frames must not replace
+                // the user's paused selection or its explicit frame capture.
+                QTest::qSleep(400);
+            }
+        });
+        playback.play(asset);
+        QTRY_VERIFY_WITH_TIMEOUT(latest.isValid() || !playback.error().isEmpty(), 10000);
+        QVERIFY2(playback.error().isEmpty(), qPrintable(playback.error()));
+        QVERIFY2(qualifiedPrivateFfmpegIsMapped(),
+                 "The matching private FFmpeg plugin is required");
+        QCOMPARE(latest.size, displaySize);
+        playback.pause();
+        QVERIFY(!playback.playing());
+        delayPreview = true;
+        playback.seek(1000);
+        QTRY_VERIFY_WITH_TIMEOUT(delayed || !playback.error().isEmpty(), 10000);
+        QVERIFY2(playback.error().isEmpty(), qPrintable(playback.error()));
+        QCOMPARE(requestedPreview.timestampUs, qint64(1000000));
+        QTest::qWait(200);
+        QVERIFY(!playback.playing());
+        QCOMPARE(latest.timestampUs, requestedPreview.timestampUs);
+        QCOMPARE(playback.position(), qint64(1000));
+        QCOMPARE(latest.size, requestedPreview.size);
+        QVERIFY2(latest.rgba8888 == requestedPreview.rgba8888,
+                 "Late decoded pixels replaced the paused presentation");
+        const auto capturedPreview = playback.captureCurrentFrame();
+        QVERIFY(capturedPreview.has_value());
+        QCOMPARE(capturedPreview->timestampUs, requestedPreview.timestampUs);
+        QCOMPARE(capturedPreview->size, requestedPreview.size);
+        QVERIFY2(capturedPreview->rgba8888 == requestedPreview.rgba8888,
+                 "Frame capture used a late decoder frame instead of the paused presentation");
+
+        playback.resume();
+        QTRY_VERIFY_WITH_TIMEOUT(playback.playing(), 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(latest.timestampUs > requestedPreview.timestampUs, 2000);
+        playback.pause();
+        QVERIFY(!playback.playing());
+        latest = {};
+        playback.seek(500);
+        QTRY_VERIFY_WITH_TIMEOUT(latest.isValid() && latest.timestampUs == 500000, 10000);
+        const MotionPhotoFrameRaster secondPreview = latest;
+        QTest::qWait(200);
+        QVERIFY(!playback.playing());
+        QCOMPARE(playback.position(), qint64(500));
+        QCOMPARE(latest.timestampUs, secondPreview.timestampUs);
+        QVERIFY2(latest.rgba8888 == secondPreview.rgba8888,
+                 "A subsequent paused seek did not retain its own selection");
+        const auto capturedSecondPreview = playback.captureCurrentFrame();
+        QVERIFY(capturedSecondPreview.has_value());
+        QCOMPARE(capturedSecondPreview->timestampUs, secondPreview.timestampUs);
+        QVERIFY2(capturedSecondPreview->rgba8888 == secondPreview.rgba8888,
+                 "Frame capture retained the previous paused seek");
+        playback.stop();
+        QTRY_VERIFY(!playback.active());
+        QVERIFY(policy.processingMutex().tryLock());
+        policy.processingMutex().unlock();
+    }
+
     void playbackSeekStopAndReopen()
     {
 #ifndef LICASA_HEIC_MOTION_FIXTURE

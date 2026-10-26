@@ -6,14 +6,21 @@
 
 import QtQuick
 import QtQuick.Dialogs
+import "DialogRuntime.js" as DialogRuntime
 
 FileDialog {
     id: dialog
+    objectName: "animationExportDialog"
 
     required property url suggestedFile
     required property string suggestedSuffix
 
     signal fileChosen(url fileUrl)
+    signal openFailed(string message)
+
+    function openSafely() {
+        return DialogRuntime.open(dialog)
+    }
 
     title: "Export animation as"
     fileMode: FileDialog.SaveFile

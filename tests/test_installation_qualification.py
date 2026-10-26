@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -17,12 +18,44 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DependencyRecipeTests(unittest.TestCase):
+    def test_wrapper_packages_cover_normal_launchers_and_recover_from_the_copied_apprun(self):
+        for name in ("verify_rpm_container.py", "verify_arch_package.py"):
+            with self.subTest(tool=name), tempfile.TemporaryDirectory() as temporary:
+                sys.path.insert(0, str(ROOT / "tools"))
+                try:
+                    spec = importlib.util.spec_from_file_location("wrapper_qualification", ROOT / "tools" / name)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                finally:
+                    sys.path.remove(str(ROOT / "tools"))
+                package = Path(temporary) / "candidate-package"
+                package.write_bytes(b"fixture, no external package manager is executed")
+                output = Path(temporary) / "report.json"
+                arguments = [name, str(package), "--output", str(output)]
+                result = SimpleNamespace(returncode=0, stdout="display evidence", stderr="")
+                with patch.object(sys, "argv", arguments), \
+                        patch.object(module.subprocess, "run", return_value=result) as run, \
+                        patch.object(module, "parse_display_graphics", return_value={"status": "passed"}), \
+                        patch.object(module, "run_reader_checks", return_value={"status": "passed"}), \
+                        patch.object(module, "run_motion_checks", return_value={"status": "passed"}), \
+                        patch.object(module, "run_dialog_checks", return_value=[]) as dialogs:
+                    module.main()
+                sessions = [call.args[0] for call in run.call_args_list if call.args[0][:2] == ["docker", "run"]]
+                self.assertEqual(len(sessions), 4)
+                for command in sessions:
+                    self.assertIn("sh /opt/check_display_session.sh /usr/bin/licasa ", command[-1])
+                keywords = dialogs.call_args.kwargs
+                self.assertEqual(keywords["app"], "/opt/licasa/AppRun")
+                copied_root = Path(keywords["qml_root"]).parents[1]
+                self.assertEqual(Path(keywords["app"]), copied_root / "AppRun")
+                self.assertEqual(keywords["diagnostic"], str(copied_root / "usr/bin/licasa_diagnostics"))
+
     def test_library_checks_precede_desktop_tool_installation(self):
         for name in ("verify_deb_container.py", "verify_appimage_container.py",
                      "verify_appimage_fedora.py", "verify_rpm_container.py", "verify_arch_package.py"):
             with self.subTest(tool=name):
                 tree = ast.parse((ROOT / "tools" / name).read_text())
-                names = {"args": SimpleNamespace(ubuntu_version="24.04")}
+                names = {"args": SimpleNamespace(ubuntu_version="24.04", target="ubuntu-24.04")}
                 for node in tree.body:
                     if (isinstance(node, ast.Assign)
                             and any(isinstance(target, ast.Name) and target.id == "HOST_RUNTIME_PACKAGES"

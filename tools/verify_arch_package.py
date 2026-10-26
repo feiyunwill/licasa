@@ -12,6 +12,9 @@ import subprocess
 import tempfile
 
 from display_session_results import parse_display_graphics
+from package_dialog_checks import run_dialog_checks
+from package_reader_checks import run_reader_checks
+from package_motion_checks import run_motion_checks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,7 +47,7 @@ def main() -> None:
             "&& test ! -e /usr/share/icons/hicolor/512x512/apps/licasa.png "
             "&& pacman -U --noconfirm /tmp/licasa.pkg.tar.zst\n"
             "RUN pacman -Syu --noconfirm --needed desktop-file-utils xdg-utils "
-            "xorg-server-xvfb xorg-xwininfo weston\n"
+            "xorg-server-xvfb xorg-xwininfo xorg-xprop openbox weston python\n"
             "USER 65534:65534\n"
         )
         tag = "licasa-arch-package-verify:local"
@@ -79,6 +82,16 @@ def main() -> None:
                                    f"{result.stdout}\n{result.stderr}")
             displays[name] = parse_display_graphics(result.stdout, context=f"Arch package {name}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    readers = run_reader_checks(
+        tag, diagnostic="/opt/licasa/usr/bin/licasa_diagnostics", runtime_root="/opt/licasa/usr/lib",
+        output_dir=args.output.parent / "reader-artifacts")
+    motion = run_motion_checks(
+        tag, diagnostic="/opt/licasa/usr/bin/licasa_diagnostics", runtime_root="/opt/licasa/usr",
+        output_dir=args.output.parent / "motion-artifacts")
+    dialogs = run_dialog_checks(
+        tag, output_dir=args.output.parent / "dialog-artifacts", app="/opt/licasa/AppRun", diagnostic="/opt/licasa/usr/bin/licasa_diagnostics",
+        sample=ROOT / "tests/test-assets" / SAMPLE, qml_root="/opt/licasa/usr/qml",
+        library_root="/opt/licasa/usr/lib")
     args.output.write_text(json.dumps({
         "distribution": "archlinux",
         "package_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
@@ -89,6 +102,9 @@ def main() -> None:
         "jpeg_default_selected": True,
         "viewer_launched": True,
         "display_sessions": displays,
+        "dialog_interactions": dialogs,
+        "reader_smoke": readers,
+        "motion_photo": motion,
     }, indent=2) + "\n")
     print(f"Arch package installation passed: {args.output}")
 

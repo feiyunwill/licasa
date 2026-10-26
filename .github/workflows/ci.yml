@@ -2,6 +2,20 @@ name: Build and verify
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      verify_candidate:
+        description: Build and qualify all package targets without publishing
+        required: false
+        type: boolean
+        default: false
+      expected_sha:
+        description: Full source commit required for complete candidate verification
+        required: false
+        type: string
+      retry_run_id:
+        description: Retry only failed platform checks from this completed verification run
+        required: false
+        type: string
   workflow_call:
     inputs:
       source_ref:
@@ -23,70 +37,145 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  scope:
-    if: github.event_name == 'pull_request'
+  retry:
+    if: ${{ inputs.retry_run_id != '' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/retry-verification.yml
+    with:
+      build_run_id: ${{ inputs.retry_run_id }}
+
+  plan:
+    if: ${{ inputs.retry_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      build: ${{ steps.scope.outputs.build }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-      - name: Detect documentation-only pull requests
-        id: scope
-        run: |
-          git diff --no-renames --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/changed-files"
-          python3 - "$RUNNER_TEMP/changed-files" "$GITHUB_OUTPUT" <<'PY'
-          from pathlib import Path
-          import sys
-          paths = Path(sys.argv[1]).read_bytes().split(b'\0')
-          build = any(path and not (path.endswith(b'.md') or path == b'LICENSE') for path in paths)
-          with open(sys.argv[2], 'a') as output:
-              output.write(f"build={str(build).lower()}\n")
-          PY
-
-  test:
-    needs: scope
-    if: ${{ !cancelled() && (needs.scope.result == 'skipped' || needs.scope.outputs.build == 'true') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    strategy:
-      fail-fast: true
-      matrix:
-        preset: ${{ fromJSON(inputs.presets || (github.event_name == 'pull_request' && '["release"]' || '["release","asan","ubsan"]')) }}
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+      packages: ${{ steps.plan.outputs.packages }}
+      complete: ${{ steps.plan.outputs.complete }}
+      presets: ${{ steps.plan.outputs.presets }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_ref || github.sha }}
-      - name: Install build dependencies
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Select required checks and validate the source once
+        id: plan
+        env:
+          SOURCE_SHA: ${{ inputs.source_ref || github.sha }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          COMPLETE: ${{ inputs.verify_candidate || false }}
+          PRESETS: ${{ inputs.presets }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          options=()
+          if [ "$COMPLETE" = true ]; then options+=(--complete); fi
+          if [ "$EVENT" = pull_request ]; then
+            git diff --no-renames --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/changed-files"
+            options+=(--changed-files "$RUNNER_TEMP/changed-files")
+          fi
+          python3 tools/ci_plan.py plan --event "$EVENT" --source-sha "$SOURCE_SHA" \
+            --expected-sha "$EXPECTED_SHA" --presets "$PRESETS" \
+            --github-output "$GITHUB_OUTPUT" "${options[@]}"
+
+  package_contract:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Check package contracts and qualification regressions
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ca-certificates git cmake make ninja-build g++ python3 ccache \
-            pkg-config patch meson nasm clang-format-18 binutils libjpeg-turbo8-dev libtiff-dev libpng-dev libwebp-dev \
-            libx11-dev libxext-dev \
-            qt6-base-dev qt6-declarative-dev qt6-svg-dev qt6-image-formats-plugins \
-            qt6-base-private-dev qt6-declarative-private-dev qt6-shadertools-dev \
-            qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtqml-workerscript \
-            qml6-module-qttest qml6-module-qtquick-controls qml6-module-qtquick-templates \
-            qml6-module-qtquick-dialogs qml6-module-qtquick-layouts
-      - name: Check first-party C++ formatting
-        run: python3 tools/check_code_style.py
+          sudo apt-get install -y --no-install-recommends python3-pil python3-gi gir1.2-glib-2.0 dbus-daemon libglib2.0-bin patchelf gcc clang-format-18
+          python3 tools/check_code_style.py
+          python3 tools/check_support_manifest.py
+          /usr/bin/python3 -B -m unittest discover -s tests -p 'test_*.py' -v
+
+  quick:
+    name: Shared Qt runtime
+    needs: [plan, package_contract]
+    if: ${{ !cancelled() && needs.plan.outputs.build == 'true' && needs.package_contract.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      toolchain: ${{ steps.toolchain.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Install the source-check toolchain
+        run: sudo bash tools/install_ci_dependencies.sh
       - name: Fingerprint the installed dependency toolchain
         id: toolchain
         run: |
           digest="$(dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Restore exact shared Qt runtime
+        id: dependencies
+        uses: actions/cache@v5
+        with:
+          path: build/deps/qt-backport-runtime
+          key: source-quick-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('packaging/qt-backport.lock.json', 'packaging/patches/**', 'tools/build_ci_dependencies.py', 'tools/build_qt_backport.py', 'tools/runtime_profiles.py', 'tools/source_cache.py') }}
+      - name: Build the identical Release Qt runtime once
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        run: python3 tools/build_ci_dependencies.py quick --jobs "$(nproc)"
+      - name: Preserve runtime permissions, links and provenance
+        run: tar -C build/deps -czf build/quick-runtime.tar.gz qt-backport-runtime
+      - uses: actions/upload-artifact@v7
+        with:
+          name: verification-qt-quick
+          path: build/quick-runtime.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  test:
+    needs: [plan, quick]
+    if: ${{ !cancelled() && needs.plan.outputs.build == 'true' && needs.quick.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: ${{ fromJSON(needs.plan.outputs.presets) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Install the source-check toolchain
+        run: sudo bash tools/install_ci_dependencies.sh
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-qt-quick
+          path: build/shared-runtime
+      - name: Restore the same verified Qt runtime
+        run: |
+          mkdir -p build/deps
+          tar -C build/deps -xzf build/shared-runtime/quick-runtime.tar.gz
+      - name: Fingerprint the installed dependency toolchain
+        id: toolchain
+        env:
+          EXPECTED_TOOLCHAIN: ${{ needs.quick.outputs.toolchain }}
+        run: |
+          digest="$(dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
+          test "$digest" = "$EXPECTED_TOOLCHAIN"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Restore exact private dependencies
         id: dependencies
         uses: actions/cache@v5
         with:
-          path: |
-            build/codecs/prefix
-            build/deps/qt-backport-runtime
+          path: build/codecs/prefix
           # No fallback keys: release/ASan/UBSan and ABI revisions stay separate.
-          key: native-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', '.github/workflows/ci.yml') }}
+          key: source-codecs-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'packaging/qt-runtime-modules.json', 'cmake/LicasaRuntimeProfiles.cmake', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', 'tools/build_ci_dependencies.py') }}
       - name: Cache compiler outputs
         uses: actions/cache@v5
         with:
@@ -98,20 +187,11 @@ jobs:
           ccache --max-size=400M
           echo 'CMAKE_C_COMPILER_LAUNCHER=ccache' >> "$GITHUB_ENV"
           echo 'CMAKE_CXX_COMPILER_LAUNCHER=ccache' >> "$GITHUB_ENV"
-      - name: Build the same-version Qt Quick cleanup backport
-        if: steps.dependencies.outputs.cache-hit != 'true'
-        run: python3 tools/build_qt_backport.py --jobs "$(nproc)"
-      - name: Build maintained native image codecs
+      - name: Build matching sanitizer codec dependencies
         if: steps.dependencies.outputs.cache-hit != 'true'
         env:
           PRESET: ${{ matrix.preset }}
-        run: |
-          case "$PRESET" in
-            release) sanitizer=() ;;
-            asan) sanitizer=(--sanitizer address) ;;
-            ubsan) sanitizer=(--sanitizer undefined) ;;
-          esac
-          python3 tools/build_codecs.py --prefix "$PWD/build/codecs/prefix" "${sanitizer[@]}" --jobs "$(nproc)"
+        run: python3 tools/build_ci_dependencies.py codecs --preset "$PRESET" --jobs "$(nproc)"
       - name: Configure the application and matching sanitizer tests
         run: |
           cmake --preset ${{ matrix.preset }} \
@@ -142,3 +222,272 @@ jobs:
             build/${{ matrix.preset }}/package-smoke.json
             build/${{ matrix.preset }}/raw-viewer-behavior.json
             build/${{ matrix.preset }}/viewer-lifecycle.json
+
+  ubuntu:
+    needs: [plan, package_contract]
+    if: ${{ !cancelled() && needs.plan.outputs.packages == 'true' && needs.package_contract.result == 'success' }}
+    uses: ./.github/workflows/build-native.yml
+    with:
+      source_ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      target: ubuntu-24.04
+      artifact: verification-ubuntu-packages
+      pr_checks: ${{ github.event_name == 'pull_request' }}
+
+  debian:
+    needs: [plan, package_contract]
+    if: ${{ !cancelled() && needs.plan.outputs.packages == 'true' && needs.package_contract.result == 'success' }}
+    uses: ./.github/workflows/build-native.yml
+    with:
+      source_ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      target: debian-13
+      artifact: verification-debian-packages
+      pr_checks: ${{ github.event_name == 'pull_request' }}
+
+  wrappers:
+    needs: [plan, ubuntu]
+    if: ${{ needs.plan.outputs.complete == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-ubuntu-packages
+          path: build/candidate-packages
+      - name: Build both wrappers from the same immutable portable payload
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(cat build/candidate-packages/deb/source-commit.txt)" = "$SOURCE_SHA"
+          (cd build/candidate-packages/appimage && sha256sum --check "Licasa-${VERSION}-x86_64.AppImage.sha256")
+          appimage="build/candidate-packages/appimage/Licasa-${VERSION}-x86_64.AppImage"
+          python3 tools/package_rpm.py "$appimage" --output-dir build/candidate-wrappers/rpm
+          python3 tools/package_arch.py "$appimage" --output-dir build/candidate-wrappers/arch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: verification-portable-packages
+          path: build/candidate-wrappers/
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 0
+
+  snap:
+    needs: [plan, ubuntu]
+    if: ${{ needs.plan.outputs.complete == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-ubuntu-packages
+          path: build/candidate-packages
+      - name: Prepare the exact same-run Ubuntu package for confined repackaging
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(cat build/candidate-packages/deb/source-commit.txt)" = "$SOURCE_SHA"
+          (cd build/candidate-packages/deb && sha256sum --check "licasa_${VERSION}-1_amd64.deb.sha256")
+          mkdir -p snap-input
+          cp "build/candidate-packages/deb/licasa_${VERSION}-1_amd64.deb" \
+            "build/candidate-packages/deb/licasa_${VERSION}-1_amd64.deb.sha256" \
+            build/candidate-packages/deb/source-commit.txt snap-input/
+      - name: Build Snap in the disposable hosted VM
+        id: snapcraft
+        uses: snapcore/action-build@v1
+      - name: Inspect, install and smoke-test the same confined package
+        env:
+          SNAP_FILE: ${{ steps.snapcraft.outputs.snap }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          test -f "$SNAP_FILE"
+          mkdir -p build/candidate-snap
+          cp "$SNAP_FILE" "build/candidate-snap/licasa_${VERSION}_amd64.snap"
+          (cd build/candidate-snap && sha256sum "licasa_${VERSION}_amd64.snap" > "licasa_${VERSION}_amd64.snap.sha256")
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools
+          test "$(unsquashfs -cat "$SNAP_FILE" usr/share/licasa/source-commit)" = "$SOURCE_SHA"
+          unsquashfs -cat "$SNAP_FILE" usr/share/licasa/qt-runtime-inventory.json > build/candidate-snap/qt-runtime-inventory.json
+          sudo snap set system experimental.user-daemons=false
+          sudo snap install --dangerous "$SNAP_FILE"
+          python3 tools/verify_snap_install.py --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --output build/candidate-snap/install-smoke.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-snap
+          path: build/candidate-snap/
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 0
+
+  packages:
+    needs: [plan, ubuntu, debian, wrappers]
+    if: ${{ needs.plan.outputs.complete == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/candidate-packages
+      - name: Run the manifest's package and interaction checks
+        env:
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          mkdir -p build/candidate-reports
+          python3 tools/qualification_evidence.py run-target --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" \
+            --packages build/candidate-packages --evidence build/candidate-reports --target "$TARGET"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-outcome-${{ matrix.target }}
+          path: build/candidate-reports/
+          retention-days: 90
+          if-no-files-found: error
+
+  snap_desktops:
+    needs: [plan, snap]
+    if: ${{ needs.plan.outputs.complete == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        desktop: [gnome, kde]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-snap
+          path: build/candidate-packages/snap
+      - name: Install the exact candidate and disposable desktop
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+          DESKTOP: ${{ matrix.desktop }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pil xvfb dbus-x11 \
+            libglib2.0-bin x11-utils xdotool imagemagick mesa-utils libgl1-mesa-dri fonts-dejavu-core
+          case "$DESKTOP" in
+            gnome) sudo apt-get install -y --no-install-recommends gnome-shell ;;
+            kde) sudo apt-get install -y --no-install-recommends kwin-x11 kwin-wayland qtwayland5 plasma-desktop plasma-workspace plasma-workspace-wayland ;;
+          esac
+          (cd build/candidate-packages/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
+          sudo snap set system experimental.user-daemons=false
+          sudo snap install --dangerous "build/candidate-packages/snap/licasa_${VERSION}_amd64.snap"
+          python3 tools/verify_snap_install.py --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --output build/candidate-install.json
+      - name: Qualify GNOME or Plasma with retained evidence
+        env:
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          TARGET: ubuntu24-snap-${{ matrix.desktop }}
+        run: |
+          /usr/bin/python3 tools/qualification_evidence.py run-target --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" \
+            --packages build/candidate-packages --evidence build/candidate-reports --target "$TARGET"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-outcome-snap-${{ matrix.desktop }}
+          path: build/candidate-reports/
+          retention-days: 90
+          if-no-files-found: error
+
+  attest:
+    needs: [plan, test, packages, snap_desktops]
+    if: ${{ !cancelled() && needs.plan.outputs.complete == 'true' && needs.test.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-ubuntu-packages
+          path: build/candidate-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-debian-packages
+          path: build/candidate-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-snap
+          path: build/candidate-packages/snap
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-portable-packages
+          path: build/candidate-packages
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: verification-outcome-*
+          path: build/candidate-evidence
+          merge-multiple: true
+      - name: Bind all outcomes to the exact candidate
+        env:
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 tools/qualification_evidence.py assemble --source-sha "$SOURCE_SHA" \
+            --build-run-id "$BUILD_RUN_ID" --version "$VERSION" --packages build/candidate-packages --evidence build/candidate-evidence
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: licasa-verification-evidence
+          path: build/candidate-evidence/
+          retention-days: 90
+          if-no-files-found: error
+
+  result:
+    name: Required verification complete
+    needs: [plan, package_contract, quick, test, ubuntu, debian, wrappers, snap, packages, snap_desktops, attest]
+    if: ${{ always() && inputs.retry_run_id == '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - name: Reject failed, cancelled, missing or skipped required checks
+        env:
+          CI_RESULTS: ${{ toJSON(needs) }}
+        run: python3 tools/ci_plan.py check

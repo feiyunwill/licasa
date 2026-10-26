@@ -4,7 +4,9 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QImageReader>
 #include <QJsonArray>
 #include <QMouseEvent>
 #include <QQuickWindow>
@@ -35,10 +37,13 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
         AwaitEditorStop,
         AwaitReturnedTray,
         AwaitReplay,
+        AwaitSavedFrame,
         AwaitClear,
     };
 
   public:
+    explicit MotionPhotoControlsCheck(const QString& frameOutput) : frameOutput_(frameOutput) {}
+
     bool attach(QQuickWindow* window) override
     {
         window_ = window;
@@ -48,6 +53,8 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             return false;
         }
 
+        elapsed_.start();
+        recordState(QStringLiteral("attached"));
         timer_.setInterval(20);
         connect(&timer_, &QTimer::timeout, this, &MotionPhotoControlsCheck::poll);
         timer_.start();
@@ -134,6 +141,13 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
         }
 
         QObject* control = controls();
+        if (stage_ == Stage::AwaitScrubFrame) {
+            const auto state = stateSnapshot();
+            if (state != lastScrubState_) {
+                lastScrubState_ = state;
+                recordState(QStringLiteral("scrub-state"));
+            }
+        }
         switch (stage_) {
         case Stage::AwaitInitialTray:
             if (!session_->available() || !control) {
@@ -159,7 +173,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
                 finish(QStringLiteral("Could not invoke the production play control"));
                 return;
             }
-            stage_ = Stage::AwaitFirstFrame;
+            setStage(Stage::AwaitFirstFrame);
             return;
 
         case Stage::AwaitFirstFrame:
@@ -208,7 +222,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
                 finish(QStringLiteral("Could not invoke the production pause control"));
                 return;
             }
-            stage_ = Stage::AwaitPause;
+            setStage(Stage::AwaitPause);
             return;
 
         case Stage::AwaitPause:
@@ -237,11 +251,12 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             }
             targetMs_ = session_->durationMs() / 2;
             result_["pause_from_visible_control"] = true;
+            recordState(QStringLiteral("seek-intent"));
             if (!seek(control, 0.5)) {
                 finish(QStringLiteral("Could not invoke the production scrub control"));
                 return;
             }
-            stage_ = Stage::AwaitScrubFrame;
+            setStage(Stage::AwaitScrubFrame);
             return;
 
         case Stage::AwaitScrubFrame: {
@@ -267,7 +282,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
                 finish(QStringLiteral("Could not resume from the production play control"));
                 return;
             }
-            stage_ = Stage::AwaitResume;
+            setStage(Stage::AwaitResume);
             return;
         }
 
@@ -280,7 +295,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             // resumed halfway through could naturally reach EOF during the
             // desktop's double-click interval.
             session_->stop();
-            stage_ = Stage::AwaitReplayControl;
+            setStage(Stage::AwaitReplayControl);
             return;
 
         case Stage::AwaitReplayControl:
@@ -291,7 +306,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
                 finish(QStringLiteral("Could not prepare floating playback"));
                 return;
             }
-            stage_ = Stage::AwaitFloatingFrame;
+            setStage(Stage::AwaitFloatingFrame);
             return;
 
         case Stage::AwaitFloatingFrame:
@@ -303,7 +318,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
                 finish(QStringLiteral("Could not enter floating mode"));
                 return;
             }
-            stage_ = Stage::AwaitFloatingWindow;
+            setStage(Stage::AwaitFloatingWindow);
             return;
 
         case Stage::AwaitFloatingWindow:
@@ -322,7 +337,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             result_["floating_has_no_transport_object"] = true;
             result_["floating_transition_preserves_playback"] = true;
             clickFloatingImage();
-            stage_ = Stage::AwaitSingleClickPause;
+            setStage(Stage::AwaitSingleClickPause);
             return;
 
         case Stage::AwaitSingleClickPause:
@@ -337,7 +352,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             result_["floating_single_click_pauses"] = true;
             targetMs_ = session_->positionMs();
             clickFloatingImage(true);
-            stage_ = Stage::AwaitPausedDoubleClick;
+            setStage(Stage::AwaitPausedDoubleClick);
             return;
 
         case Stage::AwaitPausedDoubleClick:
@@ -353,7 +368,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             }
             result_["paused_double_click_preserves_position"] = true;
             QMetaObject::invokeMethod(window_, "exitFullScreenToImage");
-            stage_ = Stage::AwaitPausedFloatingWindow;
+            setStage(Stage::AwaitPausedFloatingWindow);
             return;
 
         case Stage::AwaitPausedFloatingWindow:
@@ -371,7 +386,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             }
             result_["paused_floating_transition_preserves_position"] = true;
             clickFloatingImage();
-            stage_ = Stage::AwaitSingleClickResume;
+            setStage(Stage::AwaitSingleClickResume);
             return;
 
         case Stage::AwaitSingleClickResume:
@@ -385,7 +400,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             }
             result_["floating_single_click_resumes"] = true;
             clickFloatingImage(true);
-            stage_ = Stage::AwaitPlayingDoubleClick;
+            setStage(Stage::AwaitPlayingDoubleClick);
             return;
 
         case Stage::AwaitPlayingDoubleClick:
@@ -401,7 +416,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             }
             result_["floating_double_click_restores_fullscreen_without_pause"] = true;
             window_->setProperty("editPanelOpen", true);
-            stage_ = Stage::AwaitEditorStop;
+            setStage(Stage::AwaitEditorStop);
             return;
 
         case Stage::AwaitEditorStop:
@@ -416,7 +431,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             result_["editor_transition_stops_playback"] = true;
             result_["editor_transition_removes_tray"] = true;
             window_->setProperty("editPanelOpen", false);
-            stage_ = Stage::AwaitReturnedTray;
+            setStage(Stage::AwaitReturnedTray);
             return;
 
         case Stage::AwaitReturnedTray:
@@ -449,7 +464,7 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
                 finish(QStringLiteral("Could not replay after leaving the editor"));
                 return;
             }
-            stage_ = Stage::AwaitReplay;
+            setStage(Stage::AwaitReplay);
             return;
 
         case Stage::AwaitReplay:
@@ -462,13 +477,60 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
             if (!session_->active() || !session_->playing()) {
                 return;
             }
+            if (!motionSurface() || !motionSurface()->property("hasFrame").toBool()) {
+                return;
+            }
             result_["replay_after_editor"] = true;
+            if (!frameOutput_.isEmpty()) {
+                if (QFileInfo::exists(frameOutput_)) {
+                    finish(QStringLiteral("Frame qualification output already exists"));
+                    return;
+                }
+                savedFrameSize_ = motionSurface()->property("frameSize").toSize();
+                if (savedFrameSize_.isEmpty() ||
+                    !QMetaObject::invokeMethod(
+                        window_, "saveCurrentMotionFrame", Qt::DirectConnection,
+                        Q_ARG(QVariant, QVariant::fromValue(QUrl::fromLocalFile(frameOutput_))))) {
+                    finish(QStringLiteral("Could not invoke production Motion Photo frame save"));
+                    return;
+                }
+                setStage(Stage::AwaitSavedFrame);
+                return;
+            }
             if (!QMetaObject::invokeMethod(window_, "clearImageState", Qt::DirectConnection)) {
                 finish(QStringLiteral("Could not invoke production clearImageState"));
                 return;
             }
-            stage_ = Stage::AwaitClear;
+            setStage(Stage::AwaitClear);
             return;
+
+        case Stage::AwaitSavedFrame: {
+            if (!QFileInfo::exists(frameOutput_)) {
+                return;
+            }
+            QImageReader reader(frameOutput_);
+            const QImage image = reader.read();
+            if (image.isNull() || image.size() != savedFrameSize_) {
+                finish(QStringLiteral(
+                    "Saved Motion Photo frame does not decode at its captured size"));
+                return;
+            }
+            if (session_->active() || session_->playing()) {
+                finish(QStringLiteral("Frame save did not release the active media backend"));
+                return;
+            }
+            result_["captured_frame_saved_and_decoded"] = true;
+            result_["frame_save_releases_playback"] = true;
+            result_["saved_frame_output"] = frameOutput_;
+            result_["saved_frame_width"] = image.width();
+            result_["saved_frame_height"] = image.height();
+            if (!QMetaObject::invokeMethod(window_, "clearImageState", Qt::DirectConnection)) {
+                finish(QStringLiteral("Could not clear after Motion Photo frame save"));
+                return;
+            }
+            setStage(Stage::AwaitClear);
+            return;
+        }
 
         case Stage::AwaitClear:
             if (session_->available() || session_->active() || session_->playing() || controls() ||
@@ -484,11 +546,107 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
         }
     }
 
+    QString stageName() const
+    {
+        switch (stage_) {
+        case Stage::AwaitInitialTray:
+            return QStringLiteral("AwaitInitialTray");
+        case Stage::AwaitFirstFrame:
+            return QStringLiteral("AwaitFirstFrame");
+        case Stage::AwaitPause:
+            return QStringLiteral("AwaitPause");
+        case Stage::AwaitScrubFrame:
+            return QStringLiteral("AwaitScrubFrame");
+        case Stage::AwaitResume:
+            return QStringLiteral("AwaitResume");
+        case Stage::AwaitReplayControl:
+            return QStringLiteral("AwaitReplayControl");
+        case Stage::AwaitFloatingFrame:
+            return QStringLiteral("AwaitFloatingFrame");
+        case Stage::AwaitFloatingWindow:
+            return QStringLiteral("AwaitFloatingWindow");
+        case Stage::AwaitSingleClickPause:
+            return QStringLiteral("AwaitSingleClickPause");
+        case Stage::AwaitPausedDoubleClick:
+            return QStringLiteral("AwaitPausedDoubleClick");
+        case Stage::AwaitPausedFloatingWindow:
+            return QStringLiteral("AwaitPausedFloatingWindow");
+        case Stage::AwaitSingleClickResume:
+            return QStringLiteral("AwaitSingleClickResume");
+        case Stage::AwaitPlayingDoubleClick:
+            return QStringLiteral("AwaitPlayingDoubleClick");
+        case Stage::AwaitEditorStop:
+            return QStringLiteral("AwaitEditorStop");
+        case Stage::AwaitReturnedTray:
+            return QStringLiteral("AwaitReturnedTray");
+        case Stage::AwaitReplay:
+            return QStringLiteral("AwaitReplay");
+        case Stage::AwaitSavedFrame:
+            return QStringLiteral("AwaitSavedFrame");
+        case Stage::AwaitClear:
+            return QStringLiteral("AwaitClear");
+        }
+        return {};
+    }
+
+    QJsonObject stateSnapshot() const
+    {
+        QJsonObject state;
+        state["stage"] = stageName();
+        state["target_ms"] = double(targetMs_);
+        if (session_) {
+            state["available"] = session_->available();
+            state["active"] = session_->active();
+            state["playing"] = session_->playing();
+            state["seekable"] = session_->seekable();
+            state["position_ms"] = double(session_->positionMs());
+            state["duration_ms"] = double(session_->durationMs());
+            state["error"] = session_->errorString();
+        }
+        if (QObject* control = controls()) {
+            state["control_visible"] = control->property("visible").toBool();
+            state["control_playing"] = control->property("playing").toBool();
+            state["control_can_scrub"] = control->property("canScrub").toBool();
+            state["control_interaction_enabled"] = control->property("interactionEnabled").toBool();
+        }
+        if (QObject* surface = motionSurface()) {
+            state["has_frame"] = surface->property("hasFrame").toBool();
+            state["frame_timestamp_us"] =
+                double(surface->property("frameTimestampUs").toLongLong());
+        }
+        return state;
+    }
+
+    void recordState(const QString& event)
+    {
+        QJsonObject state = stateSnapshot();
+        state["event"] = event;
+        state["elapsed_ms"] = double(elapsed_.elapsed());
+        state["stage_elapsed_ms"] = double(elapsed_.elapsed() - stageStartedMs_);
+        // Retain bounded state evidence without logging every poll or changing
+        // transport intent, presentation assertions, or the 30-second deadline.
+        if (trace_.size() < 128) {
+            trace_.append(state);
+        }
+    }
+
+    void setStage(Stage stage)
+    {
+        recordState(QStringLiteral("stage-completed"));
+        stage_ = stage;
+        stageStartedMs_ = elapsed_.elapsed();
+        recordState(QStringLiteral("stage-entered"));
+    }
+
     void finish(const QString& error = {})
     {
         if (done_) {
             return;
         }
+        recordState(QStringLiteral("finished"));
+        result_["state_trace"] = trace_;
+        result_["final_state"] = stateSnapshot();
+        result_["elapsed_ms"] = double(elapsed_.elapsed());
         done_ = true;
         timer_.stop();
         if (!error.isEmpty()) {
@@ -514,9 +672,15 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
     Licasa::MotionPhotoSession* session_ = nullptr;
     QTimer timer_;
     QJsonObject result_;
+    QString frameOutput_;
+    QSize savedFrameSize_;
     qint64 targetMs_ = 0;
     qint64 initialFrameTimestampUs_ = -1;
     QElapsedTimer gestureTimer_;
+    QElapsedTimer elapsed_;
+    qint64 stageStartedMs_ = 0;
+    QJsonArray trace_;
+    QJsonObject lastScrubState_;
     Stage stage_ = Stage::AwaitInitialTray;
     bool sawReplayDecodeBlock_ = false;
     bool done_ = false;
@@ -524,9 +688,9 @@ class MotionPhotoControlsCheck final : public QObject, public DiagnosticCheck {
 
 } // namespace
 
-std::unique_ptr<DiagnosticCheck> makeMotionPhotoControlsCheck()
+std::unique_ptr<DiagnosticCheck> makeMotionPhotoControlsCheck(const QString& frameOutput)
 {
-    return std::make_unique<MotionPhotoControlsCheck>();
+    return std::make_unique<MotionPhotoControlsCheck>(frameOutput);
 }
 
 } // namespace LicasaDiagnostics

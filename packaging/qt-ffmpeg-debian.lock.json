@@ -1,0 +1,43 @@
+{
+  "version": "6.8.2",
+  "runtime_profile": "debian-6.8.2",
+  "url": "https://deb.debian.org/debian/pool/main/q/qt6-multimedia/qt6-multimedia_6.8.2.orig.tar.xz",
+  "sha256": "34f561fdc07b158bcc4ad040b596fc6086c48908060e854b473b557e4feb1569",
+  "debian_patch_url": "https://deb.debian.org/debian/pool/main/q/qt6-multimedia/qt6-multimedia_6.8.2-8.debian.tar.xz",
+  "debian_patch_sha256": "ef170ab6544f726edeb170ef56e26aec725fa3b4d1ad6c0bd6cd846bbc69c86b",
+  "debian_patches": [
+    "debian/patches/system-eigen3.patch"
+  ],
+  "patches": [
+    "packaging/patches/qt-6.8-ffmpeg-input-cleanup.patch"
+  ],
+  "upstream_fixes": {
+    "dictionary_cleanup": "qffmpeg_p.h: AVDictionaryHolder frees options",
+    "decoder_device_override": "qffmpeghwaccel.cpp: QT_FFMPEG_DECODING_HW_DEVICE_TYPES",
+    "frame_duration": "playbackengine/qffmpegframe_p.h: optional mul guards zero denominator"
+  },
+  "quick_source_audit": {
+    "url": "https://deb.debian.org/debian/pool/main/q/qt6-declarative/qt6-declarative_6.8.2+dfsg.orig.tar.xz",
+    "sha256": "1a1ba5ca63ce147ccf172736173af23d6fac4dc1bfdc5eb8fd61f1a5bde8c47a",
+    "file": "src/quick/scenegraph/adaptations/software/qsgsoftwarecontext.cpp",
+    "finding": "QSGSoftwareRenderContext::invalidate already clears textures and glyph caches; use Debian's same-version Quick library",
+    "file_sha256": "5c2afb4fa6f50df621ee7d10625388c007d30bc1fbf986299718791b964026db"
+  },
+  "references": [
+    "https://sources.debian.org/src/qt6-multimedia/6.8.2-8/",
+    "https://sources.debian.org/src/qt6-declarative/6.8.2%2Bdfsg-7/",
+    "https://ffmpeg.org/doxygen/7.1/avio_read_callback_8c-example.html"
+  ],
+  "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+  "verified_upstream_files": {
+    "src/plugins/multimedia/ffmpeg/qffmpeg_p.h": "38943020f142e3a3a397c3fdb5b1ae99247c182be7eff4c3dcc9d4d793120804",
+    "src/plugins/multimedia/ffmpeg/qffmpeghwaccel.cpp": "b585def8e603e3c228e2cd2ff947652edfe58d134f6cd318e57d0a107b919792",
+    "src/plugins/multimedia/ffmpeg/playbackengine/qffmpegframe_p.h": "cabab06106243baf751c5b34a49c796c6dcc2a20a0b7f7d394354dfa9fa54388"
+  },
+  "required_features": [
+    "linux_v4l",
+    "linux_dmabuf",
+    "vaapi"
+  ],
+  "disabled_features": []
+}

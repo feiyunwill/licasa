@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 
 from display_session_results import parse_display_graphics
+from package_dialog_checks import run_dialog_checks
+from package_motion_checks import run_motion_checks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,15 +26,23 @@ SAMPLES = (
     "modern/jxl/full-hd.jxl",
     "modern/heif/with-alpha-512x512.heic",
     "formats/additional-probes/jpeg-2000.jp2",
+    "formats/additional-probes/vector-check.svg",
+    "modern/format-readers/qoi-check.qoi",
+    "modern/raw/small.dng",
+    "animated/apng/standard-transparent-320x240.apng",
 )
-FORMATS = ("jpeg", "png", "tiff", "webp", "avif", "jxl", "heif", "jp2")
+FORMATS = ("jpeg", "png", "tiff", "webp", "avif", "jxl", "heif", "jp2", "svg", "qoi", "dng", "apng")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", type=Path)
-    parser.add_argument("--output", type=Path, default=ROOT / "build/qualification/deb/install-smoke.json")
+    parser.add_argument("--target", choices=("ubuntu-24.04", "debian-13"), default="ubuntu-24.04")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.output is None:
+        folder = "debian13" if args.target == "debian-13" else "deb"
+        args.output = ROOT / "build/qualification" / folder / "install-smoke.json"
     package = args.package.resolve(strict=True)
     assets = ROOT / "tests/test-assets"
     for sample in SAMPLES:
@@ -43,7 +53,7 @@ def main() -> None:
         (work / "licasa.deb").write_bytes(package.read_bytes())
         shutil.copy2(ROOT / "packaging/install-licasa-appimage.sh", work / "installer.sh")
         (work / "Dockerfile").write_text(
-            "FROM ubuntu:24.04\n"
+            f"FROM {'debian:trixie-slim' if args.target == 'debian-13' else 'ubuntu:24.04'}\n"
             "COPY licasa.deb /tmp/licasa.deb\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends "
             "/tmp/licasa.deb "
@@ -57,10 +67,10 @@ def main() -> None:
             "/usr/lib/x86_64-linux-gnu/qt6/plugins "
             "/usr/lib/x86_64-linux-gnu/qt6/qml'\n"
             "RUN apt-get update && apt-get install -y --no-install-recommends "
-            "xvfb x11-utils weston libgl1-mesa-dri desktop-file-utils xdg-utils "
+            "xvfb x11-utils openbox weston libgl1-mesa-dri desktop-file-utils xdg-utils python3 "
             "&& rm -rf /var/lib/apt/lists/*\n"
         )
-        tag = "licasa-deb-verify:local"
+        tag = f"licasa-deb-{args.target}-verify:local"
         subprocess.run(["docker", "build", "--tag", tag, str(work)], check=True)
         expected_icon_hash = hashlib.sha256((ROOT / "assets/licasa.png").read_bytes()).hexdigest()
         icon_result = subprocess.run(
@@ -126,11 +136,21 @@ def main() -> None:
                                        f"{display.stdout}\n{display.stderr}")
                 displays[name] = parse_display_graphics(display.stdout, context=f"Ubuntu .deb {name}")
         report["display_sessions"] = displays
+        report["dialog_interactions"] = run_dialog_checks(
+            tag, output_dir=args.output.parent / "dialog-artifacts", app="/usr/bin/licasa", diagnostic="/usr/bin/licasa_diagnostics",
+            sample=assets / SAMPLES[0], qml_root="/usr/lib/x86_64-linux-gnu/qt6/qml",
+            library_root="/usr/lib/x86_64-linux-gnu",
+            qt_version="6.8.2" if args.target == "debian-13" else "6.4.2")
+        report["target"] = args.target
+        report["motion_photo"] = run_motion_checks(
+            tag, diagnostic="/usr/bin/licasa_diagnostics", runtime_root="/usr",
+            output_dir=args.output.parent / "motion-artifacts",
+            qt_version="6.8.2" if args.target == "debian-13" else "6.4.2")
         report["runtime_dependencies_checked_before_desktop_tools"] = True
         report["package_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
-        print(f"Clean Ubuntu apt install, viewer launch, and {len(SAMPLES)} decodes passed: {args.output}")
+        print(f"Clean {args.target} apt install, dialogs, viewer and {len(SAMPLES)} decodes passed: {args.output}")
 
 
 if __name__ == "__main__":

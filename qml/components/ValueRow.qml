@@ -42,11 +42,18 @@ Item {
     height: Math.max(92, 10 + textHeight + 12 + controls.height + 10)
     activeFocusOnTab: enabled && visible
 
+    // Qt's accessibility value interface reads these conventional properties.
+    readonly property real minimumValue: from
+    readonly property real maximumValue: to
+    readonly property real stepSize: step
+
     Accessible.role: Accessible.Slider
     Accessible.name: title
     Accessible.description: formattedValue()
     Accessible.focusable: enabled && visible
     Accessible.focused: activeFocus
+    Accessible.onIncreaseAction: root.valueChangedByUser(root.clampedValue(root.value + root.step))
+    Accessible.onDecreaseAction: root.valueChangedByUser(root.clampedValue(root.value - root.step))
 
     Keys.onPressed: function(event) {
         let nextValue = root.value
