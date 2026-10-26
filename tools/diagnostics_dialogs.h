@@ -197,12 +197,18 @@ class DialogInteractionCheck final : public QObject, public DiagnosticCheck {
         switch (stage_) {
         case 0: {
             auto* viewport = named("imageViewport");
-            if (!window_->isExposed() || !viewport ||
+            // A decoded first frame can precede Wayland keyboard activation.
+            // Window shortcuts cannot receive input until activation completes.
+            if (!window_->isExposed() || !mainWindowReady() || !viewport ||
                 viewport->property("imageStatus").toInt() != 1) {
                 return;
             }
             focusTarget_ = window_->contentItem();
             focusTarget_->forceActiveFocus();
+            if (!focusTarget_->hasActiveFocus()) {
+                return;
+            }
+            qInfo() << "[Licasa] Dialog initial keyboard focus ready";
             key(Qt::Key_O, Qt::ControlModifier);
             ++stage_;
             break;
