@@ -13,6 +13,7 @@ import sys
 import time
 from types import SimpleNamespace
 
+from check_linux_session import require_disposable_vm
 from package_motion_checks import installed_check, make_fixture
 
 
@@ -190,21 +191,56 @@ def configure_bus_desktop(environment, socket):
                    env=activation, check=True, capture_output=True, timeout=10)
 
 
-def leave_gnome_overview(environment):
+def leave_gnome_overview(environment, processes=(), timeout=30, startup_log=None):
     # A fresh GNOME session starts in Overview. Its window previews can show
     # the photo while native keyboard focus remains with the shell. Use the
     # public shell property to enter the desktop before exercising app focus.
     command = ["gdbus", "call", "--session", "--dest", "org.gnome.Shell",
                "--object-path", "/org/gnome/Shell", "--method"]
-    subprocess.run([*command, "org.freedesktop.DBus.Properties.Set", "org.gnome.Shell",
-                    "OverviewActive", "<false>"], env=environment, check=True,
-                   capture_output=True, timeout=10)
-    def inactive():
-        result = subprocess.run([*command, "org.freedesktop.DBus.Properties.Get", "org.gnome.Shell",
-                                 "OverviewActive"], env=environment, check=True,
-                                capture_output=True, text=True, timeout=5)
-        return bool(re.search(r"\bfalse\b", result.stdout))
-    wait_until(inactive, "GNOME to leave Overview")
+    deadline = time.monotonic() + timeout
+    last_reply = "no D-Bus reply"
+    requested = False
+
+    def call(method, *arguments):
+        nonlocal last_reply
+        try:
+            result = subprocess.run([*command, "org.freedesktop.DBus.Properties." + method,
+                                    "org.gnome.Shell", "OverviewActive", *arguments],
+                                   env=environment, capture_output=True, text=True,
+                                   timeout=min(5, max(0.1, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"GNOME Overview {method} call timed out; last D-Bus reply: {last_reply}") from error
+        last_reply = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+        if result.returncode:
+            # Mutter owns the bus name before GNOME's JavaScript exports this
+            # object. NameHasOwner therefore cannot establish API readiness.
+            if ("org.freedesktop.DBus.Error.UnknownMethod" in result.stderr
+                    and "Object does not exist at path" in result.stderr
+                    and "/org/gnome/Shell" in result.stderr):
+                return None
+            raise RuntimeError(f"GNOME Overview {method} failed: {last_reply}")
+        return result.stdout.strip()
+
+    while time.monotonic() < deadline:
+        if any(process.poll() is not None for process in processes):
+            raise RuntimeError(f"GNOME shell exited while preparing Overview; last D-Bus reply: {last_reply}")
+        # GNOME logs this from layoutManager's startup-complete signal. Before
+        # then, its startup animation can show Overview after a successful hide.
+        if startup_log is not None and "GNOME Shell started at " not in startup_log.read_text():
+            last_reply = f"waiting for GNOME startup-complete in {startup_log}"
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+            continue
+        state = call("Get")
+        if state is not None:
+            match = re.fullmatch(r"\(\s*<(true|false)>\s*,\s*\)", state)
+            if not match:
+                raise RuntimeError(f"Unexpected GNOME Overview state: {state}")
+            if requested and match[1] == "false":
+                return
+            if not requested or match[1] == "true":
+                requested = call("Set", "<false>") is not None
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    raise RuntimeError(f"Timed out preparing GNOME Overview; last D-Bus reply: {last_reply}")
 
 
 def screenshot(display, destination):
@@ -244,7 +280,8 @@ def qualify(args):
     report = {
         "desktop": args.desktop, "snap_version": args.version, "snap_revision": listed[1].split()[2],
         "package_source_commit": source, "cpu_model": cpu_model.group(1) if cpu_model else "unknown",
-        "display_environment": "nested_desktop_on_hosted_vm",
+        "display_environment": ("nested_desktop_on_disposable_vm" if getattr(args, "disposable_vm", False)
+                                else "nested_desktop_on_hosted_vm"),
         "physical_gpu_coverage": "not_tested", "cases": {}, "dialog_interactions": [],
         "motion_photo": {"status": "pending", "qt_version": "6.4.2",
             "runtime_root": str(Path("/snap/licasa/current").resolve(strict=True) / "usr"), "cases": [],
@@ -333,7 +370,7 @@ def qualify(args):
                 wait_until(lambda: bus_owner(owner, session_env), "desktop shell", processes)
                 for mode in ("default", "software"):
                     if args.desktop == "gnome":
-                        leave_gnome_overview(session_env)
+                        leave_gnome_overview(session_env, processes, startup_log=output / f"{protocol}-gnome.log")
                     case = f"{protocol}-{mode}"
                     app_env = dict(session_env, QT_QPA_PLATFORM="xcb" if protocol == "x11" else "wayland")
                     if mode == "software":
@@ -394,8 +431,12 @@ def main():
     parser.add_argument("--desktop", choices=("gnome", "kde"), required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--disposable-vm", action="store_true",
+                        help="Require a marked non-root QEMU/KVM guest instead of a GitHub-hosted runner")
     args = parser.parse_args()
-    if (os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    if args.disposable_vm:
+        require_disposable_vm()
+    elif (os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
             or os.environ.get("GITHUB_ACTIONS") != "true"):
         parser.error("Desktop checks may run only on a disposable GitHub-hosted VM")
     qualify(args)

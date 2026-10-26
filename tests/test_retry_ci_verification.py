@@ -27,6 +27,7 @@ class RetryVerificationTests(unittest.TestCase):
         self.jobs = [{"name": name, "status": "completed", "conclusion": "failure" if (
             "mate-accessibility" in name or name.startswith("snap_desktops")
             or name in {"attest", "Required verification complete"}) else "success"} for name in sorted(names)]
+        self.jobs.append({"name": "retry", "status": "completed", "conclusion": "skipped"})
         self.artifacts = [{"name": name, "expired": False}
                           for name in retry.PACKAGE_ARTIFACTS | {"licasa-verification-evidence"}]
 
@@ -52,6 +53,35 @@ class RetryVerificationTests(unittest.TestCase):
         for jobs in (self.jobs[1:], self.jobs + [self.jobs[0]]):
             with self.assertRaises(ValueError):
                 retry.retry_plan(self.run, jobs, self.artifacts, repository="owner/repo", branch="candidate")
+
+    def test_only_the_completed_skipped_retry_router_is_accepted(self):
+        self.plan()
+        for conclusion in ("success", "failure", "cancelled", None):
+            with self.subTest(conclusion=conclusion):
+                jobs = copy.deepcopy(self.jobs)
+                next(row for row in jobs if row["name"] == "retry")["conclusion"] = conclusion
+                with self.assertRaisesRegex(ValueError, "retry routing"):
+                    retry.retry_plan(self.run, jobs, self.artifacts, repository="owner/repo", branch="candidate")
+        jobs = [row for row in self.jobs if row["name"] != "retry"]
+        with self.assertRaisesRegex(ValueError, "retry routing"):
+            retry.retry_plan(self.run, jobs, self.artifacts, repository="owner/repo", branch="candidate")
+        jobs = copy.deepcopy(self.jobs)
+        next(row for row in jobs if row["name"] == "retry")["status"] = "in_progress"
+        with self.assertRaisesRegex(ValueError, "unfinished"):
+            retry.retry_plan(self.run, jobs, self.artifacts, repository="owner/repo", branch="candidate")
+
+    def test_unknown_skipped_jobs_and_skipped_platform_checks_still_reject(self):
+        jobs = self.jobs + [{"name": "unexpected", "status": "completed", "conclusion": "skipped"}]
+        with self.assertRaisesRegex(ValueError, "expected verification graph"):
+            retry.retry_plan(self.run, jobs, self.artifacts, repository="owner/repo", branch="candidate")
+        for row in self.jobs:
+            if not row["name"].startswith(("packages (", "snap_desktops (")):
+                continue
+            with self.subTest(name=row["name"]):
+                jobs = copy.deepcopy(self.jobs)
+                next(job for job in jobs if job["name"] == row["name"])["conclusion"] = "skipped"
+                with self.assertRaisesRegex(ValueError, "skipped or missing"):
+                    retry.retry_plan(self.run, jobs, self.artifacts, repository="owner/repo", branch="candidate")
 
     def test_wrong_run_or_branch_and_expired_artifacts_are_rejected(self):
         for key, value in (("head_branch", "other"), ("path", ".github/workflows/other.yml"),
@@ -108,6 +138,15 @@ class RetryVerificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "clean"):
                     retry.validate_verifier(candidate, verifier)
                 (root / "untracked").unlink()
+                (root / "tools/retry_ci_verification.py").write_text("routing fix")
+                (root / "tests").mkdir()
+                (root / "tests/test_retry_ci_verification.py").write_text("routing regression")
+                git("add", "tools/retry_ci_verification.py", "tests/test_retry_ci_verification.py")
+                git("commit", "-qm", "retry planner")
+                verifier = git("rev-parse", "HEAD")
+                self.assertEqual(retry.validate_verifier(candidate, verifier), [
+                    "tests/test_retry_ci_verification.py", "tools/retry_ci_verification.py",
+                    "tools/verify_snap_desktop.py"])
                 (root / "src/main.cpp").write_text("changed")
                 git("add", "src/main.cpp")
                 git("commit", "-qm", "runtime")

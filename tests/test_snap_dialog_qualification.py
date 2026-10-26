@@ -25,6 +25,210 @@ import qt_runtime
 
 
 class SnapDialogQualificationTests(unittest.TestCase):
+    def overview_service(self, *, defer_export=False, property_name="OverviewActive", writable=True,
+                         defer_startup=False, release_readiness=True, reject_first_hide=False, timeout=3):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt = root / "receipt.json"
+            owner = root / "owner"
+            changed = root / "changed"
+            startup_log = root / "shell.log"
+            startup_log.touch()
+            export_release = root / "export-release"
+            startup_release = root / "startup-release"
+            service = root / "service.py"
+            service.write_text(textwrap.dedent(f'''\
+                from pathlib import Path
+                from gi.repository import Gio, GLib
+                connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+                xml = '<node><interface name="org.gnome.Shell"><property name="{property_name}" type="b" access="{"readwrite" if writable else "read"}"/></interface></node>'
+                info = Gio.DBusNodeInfo.new_for_xml(xml).interfaces[0]
+                state = {{'value': not {defer_startup}, 'requests': 0}}
+                def get_property(*arguments):
+                    return GLib.Variant('b', state['value'])
+                def set_property(*arguments):
+                    state['requests'] += 1
+                    state['value'] = True if {reject_first_hide} and state['requests'] == 1 else arguments[-1].unpack()
+                    Path({str(changed)!r}).write_text(str(state['value']))
+                    return True
+                def startup_complete():
+                    if not Path({str(startup_release)!r}).exists():
+                        return True
+                    state['value'] = True
+                    Path({str(startup_log)!r}).write_text('GNOME Shell started at test-startup-complete')
+                    return False
+                def export():
+                    connection.register_object('/org/gnome/Shell', info, None, get_property, set_property)
+                    return False
+                def export_when_released():
+                    if not Path({str(export_release)!r}).exists():
+                        return True
+                    return export()
+                connection.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus',
+                    'org.freedesktop.DBus', 'RequestName', GLib.Variant('(su)', ('org.gnome.Shell', 0)),
+                    None, Gio.DBusCallFlags.NONE, 5000, None)
+                if {defer_export}:
+                    GLib.timeout_add(10, export_when_released)
+                else:
+                    export()
+                if {defer_startup}:
+                    GLib.timeout_add(10, startup_complete)
+                Path({str(owner)!r}).touch()
+                loop = GLib.MainLoop()
+                GLib.timeout_add(10000, loop.quit)
+                loop.run()
+                '''))
+            probe = root / "probe.py"
+            probe.write_text(textwrap.dedent(f'''\
+                import json, os, subprocess, sys, time
+                from pathlib import Path
+                sys.path.insert(0, {str(ROOT / "tools")!r})
+                import verify_snap_desktop as desktop
+                service = subprocess.Popen([sys.executable, {str(service)!r}])
+                report = {{}}
+                try:
+                    deadline = time.monotonic() + 5
+                    while not Path({str(owner)!r}).exists():
+                        assert service.poll() is None and time.monotonic() < deadline
+                        time.sleep(0.01)
+                    report['name_owned'] = desktop.bus_owner('org.gnome.Shell', dict(os.environ))
+                    if {defer_export}:
+                        early = subprocess.run(['gdbus', 'call', '--session', '--dest', 'org.gnome.Shell',
+                            '--object-path', '/org/gnome/Shell', '--method', 'org.freedesktop.DBus.Properties.Get',
+                            'org.gnome.Shell', 'OverviewActive'], capture_output=True, text=True, timeout=5)
+                        report['early_error'] = early.stderr
+                        report['early_exit'] = early.returncode
+                    if {defer_startup}:
+                        initial = subprocess.run(['gdbus', 'call', '--session', '--dest', 'org.gnome.Shell',
+                            '--object-path', '/org/gnome/Shell', '--method', 'org.freedesktop.DBus.Properties.Get',
+                            'org.gnome.Shell', 'OverviewActive'], capture_output=True, text=True, timeout=5, check=True)
+                        report['initial_startup_state'] = initial.stdout.strip()
+                    real_run = subprocess.run
+                    # Release only after the helper itself observes a real missing-object reply.
+                    def run_and_release(*arguments, **keywords):
+                        result = real_run(*arguments, **keywords)
+                        if (result.returncode and 'Object does not exist at path' in result.stderr
+                                and '/org/gnome/Shell' in result.stderr):
+                            report['helper_observed_missing_object'] = True
+                            if {release_readiness}:
+                                Path({str(export_release)!r}).touch()
+                        return result
+                    class StartupLog:
+                        def read_text(self):
+                            # Return the pending state before allowing the service to complete startup.
+                            contents = Path({str(startup_log)!r}).read_text()
+                            report['helper_observed_pending_startup'] = report.get('helper_observed_pending_startup', False) or not bool(contents)
+                            if {release_readiness}:
+                                Path({str(startup_release)!r}).touch()
+                            return contents
+                        def __str__(self):
+                            return {str(startup_log)!r}
+                    desktop.subprocess.run = run_and_release
+                    try:
+                        desktop.leave_gnome_overview(dict(os.environ), [service], timeout={timeout},
+                            startup_log=StartupLog() if {defer_startup} else None)
+                        report['status'] = 'passed'
+                    except RuntimeError as error:
+                        report.update(status='failed', error=str(error))
+                    finally:
+                        desktop.subprocess.run = real_run
+                    report['changed'] = Path({str(changed)!r}).read_text() if Path({str(changed)!r}).exists() else None
+                    report['startup_complete'] = 'GNOME Shell started at ' in Path({str(startup_log)!r}).read_text()
+                finally:
+                    service.terminate()
+                    service.wait(timeout=5)
+                    Path({str(receipt)!r}).write_text(json.dumps(report))
+                '''))
+            environment = dict(os.environ)
+            environment.pop("DBUS_SESSION_BUS_ADDRESS", None)
+            result = subprocess.run(["dbus-run-session", "--", sys.executable, str(probe)],
+                                    env=environment, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(receipt.read_text())
+
+    def test_gnome_name_owner_before_interface_export_is_not_readiness(self):
+        report = self.overview_service(defer_export=True)
+        self.assertTrue(report["name_owned"])
+        self.assertEqual(report["early_exit"], 1)
+        self.assertIn("Object does not exist at path", report["early_error"])
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["changed"], "False")
+        self.assertTrue(report["helper_observed_missing_object"])
+
+    def test_gnome_readiness_timeout_preserves_actual_dbus_error(self):
+        report = self.overview_service(defer_export=True, release_readiness=False, timeout=0.25)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("Timed out preparing GNOME Overview", report["error"])
+        self.assertIn("Object does not exist at path", report["error"])
+        self.assertIsNone(report["changed"])
+
+    def test_unsupported_gnome_property_cannot_pass_as_startup(self):
+        report = self.overview_service(property_name="AnotherProperty")
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("GNOME Overview Get failed", report["error"])
+        self.assertIn("OverviewActive", report["error"])
+        self.assertIsNone(report["changed"])
+
+    def test_gnome_property_set_failure_is_not_hidden_by_readiness(self):
+        report = self.overview_service(writable=False)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("GNOME Overview Set failed", report["error"])
+        self.assertIn("OverviewActive", report["error"])
+        self.assertIsNone(report["changed"])
+
+    def test_gnome_waits_for_startup_completion_before_hiding_overview(self):
+        report = self.overview_service(defer_startup=True)
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["changed"], "False")
+        self.assertTrue(report["startup_complete"])
+        self.assertEqual(report["initial_startup_state"], "(<false>,)")
+        self.assertTrue(report["helper_observed_pending_startup"])
+
+    def test_gnome_startup_completion_timeout_does_not_send_early_hide(self):
+        report = self.overview_service(defer_startup=True, release_readiness=False, timeout=0.25)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("waiting for GNOME startup-complete", report["error"])
+        self.assertIsNone(report["changed"])
+
+    def test_gnome_confirms_false_instead_of_trusting_successful_set(self):
+        report = self.overview_service(reject_first_hide=True)
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["changed"], "False")
+
+    def test_gnome_process_exit_is_reported_before_dbus_calls(self):
+        with patch.object(desktop.subprocess, "run") as run:
+            with self.assertRaisesRegex(RuntimeError, "GNOME shell exited"):
+                desktop.leave_gnome_overview({}, [SimpleNamespace(poll=lambda: 1)])
+            run.assert_not_called()
+
+    def test_desktop_entry_requires_hosted_runner_or_explicit_checked_vm(self):
+        argv = ["verify_snap_desktop.py", "--desktop", "gnome", "--version", "0.8.0", "--output", "/unused"]
+        with patch.object(sys, "argv", argv), patch.dict(os.environ, {}, clear=True), \
+                patch.object(desktop, "qualify") as qualify, patch.object(desktop, "require_disposable_vm") as guard:
+            with self.assertRaises(SystemExit) as error:
+                desktop.main()
+            self.assertEqual(error.exception.code, 2)
+            qualify.assert_not_called()
+            guard.assert_not_called()
+        with patch.object(sys, "argv", argv), \
+                patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_ACTIONS": "true"}, clear=True), \
+                patch.object(desktop, "qualify") as qualify, patch.object(desktop, "require_disposable_vm") as guard:
+            desktop.main()
+            qualify.assert_called_once()
+            guard.assert_not_called()
+        with patch.object(sys, "argv", [*argv, "--disposable-vm"]), patch.dict(os.environ, {}, clear=True), \
+                patch.object(desktop, "qualify") as qualify, patch.object(desktop, "require_disposable_vm") as guard:
+            desktop.main()
+            guard.assert_called_once()
+            qualify.assert_called_once()
+        with patch.object(sys, "argv", [*argv, "--disposable-vm"]), \
+                patch.object(desktop, "qualify") as qualify, \
+                patch.object(desktop, "require_disposable_vm", side_effect=RuntimeError("unmarked guest")) as guard:
+            with self.assertRaisesRegex(RuntimeError, "unmarked guest"):
+                desktop.main()
+            guard.assert_called_once()
+            qualify.assert_not_called()
+
     def test_activated_desktop_services_receive_the_selected_virtual_display(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

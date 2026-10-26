@@ -64,6 +64,12 @@ def retry_plan(run: dict, jobs: list[dict], artifacts: list[dict], *, repository
     by_name = {job["name"]: job for job in jobs}
     if len(by_name) != len(jobs):
         raise ValueError("Duplicate previous job identities")
+    # A normal candidate run explicitly skips the retry branch of ci.yml. It
+    # remains in the Actions job list, but is not an omitted verification gate.
+    # Accept only this exact routing shape; every other skipped job still fails.
+    routing = by_name.pop("retry", None)
+    if routing is None or routing.get("conclusion") != "skipped":
+        raise ValueError("Previous verification must have skipped only its retry routing job")
     if any(by_name.get(name, {}).get("conclusion") != "success" for name in BUILD_JOBS):
         raise ValueError("Every original build and source check must have succeeded before retrying platforms")
     packages = package_matrix(manifest)
