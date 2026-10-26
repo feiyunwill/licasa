@@ -8,7 +8,8 @@
   "patches": [
     "packaging/patches/qt-6.4-ffmpeg-input-cleanup.patch",
     "packaging/patches/qt-6.4-ffmpeg-decoding-device-override.patch",
-    "packaging/patches/qt-6.4-ffmpeg-frame-duration.patch"
+    "packaging/patches/qt-6.4-ffmpeg-frame-duration.patch",
+    "packaging/patches/qt-6.4-ffmpeg-demuxer-start-wakeup.patch"
   ],
   "references": [
     "https://ffmpeg.org/doxygen/6.1/avio_read_callback_8c-example.html",

@@ -96,6 +96,9 @@ class RuntimeProfiles(unittest.TestCase):
                 "patches": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                             for name in spec["patches"]},
             }
+            if profile == "ubuntu-6.4.2":
+                receipt["wakeup_qualification"] = {"status": "passed", "harness_sha256":
+                    hashlib.sha256((ROOT / "tools/verify_qt_ffmpeg_wakeup.py").read_bytes()).hexdigest()}
             if mutate:
                 mutate(receipt)
             if not missing:
@@ -128,6 +131,17 @@ class RuntimeProfiles(unittest.TestCase):
                            ("disabled_features", [])):
             result = self.check_cmake_receipt("ubuntu-6.4.2", lambda item: item.update({key: value}))
             self.assertNotEqual(result.returncode, 0, f"accepted invalid Ubuntu {key}")
+
+    def test_ubuntu_requires_demuxer_wakeup_patch_and_qualification(self):
+        patch = "packaging/patches/qt-6.4-ffmpeg-demuxer-start-wakeup.patch"
+        for mutate in (
+                lambda item: item["patches"].pop(patch),
+                lambda item: item["patches"].update({patch: "wrong"}),
+                lambda item: item.pop("wakeup_qualification"),
+                lambda item: item.update(wakeup_qualification={"status": "failed"}),
+                lambda item: item.update(wakeup_qualification={"status": "passed", "harness_sha256": "wrong"})):
+            result = self.check_cmake_receipt("ubuntu-6.4.2", mutate)
+            self.assertNotEqual(result.returncode, 0, "accepted unqualified demuxer wakeup behavior")
 
     def check_quick_receipt(self, mutate=None, *, missing=False, tamper=False, profile="ubuntu-6.4.2"):
         with tempfile.TemporaryDirectory() as temporary:

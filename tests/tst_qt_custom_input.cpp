@@ -125,8 +125,22 @@ class QtCustomInputTest : public QObject {
             QVERIFY(good.open(QIODevice::ReadOnly));
             player.setSourceDevice(&good);
             player.play();
-            QTRY_VERIFY_WITH_TIMEOUT(
-                sink.videoFrame().isValid() || player.error() != QMediaPlayer::NoError, 10000);
+            const auto recoveryState = [&] {
+                return QStringLiteral("reopen cycle %1: state=%2 status=%3 position=%4/%5 "
+                                      "buffer=%6/%7 error=%8 (%9)")
+                    .arg(cycle)
+                    .arg(int(player.playbackState()))
+                    .arg(int(player.mediaStatus()))
+                    .arg(player.position())
+                    .arg(player.duration())
+                    .arg(good.pos())
+                    .arg(good.size())
+                    .arg(int(player.error()))
+                    .arg(player.errorString());
+            };
+            QTRY_VERIFY2_WITH_TIMEOUT(sink.videoFrame().isValid() ||
+                                          player.error() != QMediaPlayer::NoError,
+                                      qPrintable(recoveryState()), 10000);
             QCOMPARE(player.error(), QMediaPlayer::NoError);
             QVERIFY(sink.videoFrame().isValid());
             player.stop();

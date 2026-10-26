@@ -58,7 +58,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: build/ci-package-dependencies/${{ inputs.target }}
-          key: package-ci-deps-v1-${{ inputs.target }}-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'packaging/qt-runtime-modules.json', 'packaging/verify-fresh-build.sh', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'tools/build_ubuntu_deb.py', 'tools/build_debian_deb.py', 'tools/build_ci_packages.py', 'tools/source_cache.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'cmake/strip_codec_rpath.cmake', 'cmake/LicasaRuntimeProfiles.cmake') }}
+          key: package-ci-deps-v1-${{ inputs.target }}-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'packaging/qt-runtime-modules.json', 'packaging/verify-fresh-build.sh', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/build_qt_ffmpeg.py', 'tools/verify_qt_ffmpeg_wakeup.py', 'tools/build_ubuntu_deb.py', 'tools/build_debian_deb.py', 'tools/build_ci_packages.py', 'tools/source_cache.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'cmake/strip_codec_rpath.cmake', 'cmake/LicasaRuntimeProfiles.cmake') }}
       - name: Build and test the canonical native runtime and packages
         env:
           TARGET: ${{ inputs.target }}

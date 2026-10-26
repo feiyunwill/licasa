@@ -96,7 +96,7 @@ jobs:
             build/release-dependencies/codecs
             build/release-dependencies/quick
             build/release-dependencies/ffmpeg
-          key: ubuntu-release-deps-v2-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'packaging/qt-runtime-modules.json', 'cmake/LicasaRuntimeProfiles.cmake', 'tools/build_qt_ffmpeg.py', 'tools/build_ubuntu_deb.py', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', 'packaging/verify-fresh-build.sh') }}
+          key: ubuntu-release-deps-v2-${{ runner.arch }}-${{ steps.builder.outputs.imageid }}-${{ hashFiles('packaging/*.lock.json', 'packaging/patches/**', 'tools/build_codecs.py', 'tools/build_qt_backport.py', 'tools/runtime_profiles.py', 'tools/qt_runtime.py', 'packaging/qt-runtime-modules.json', 'cmake/LicasaRuntimeProfiles.cmake', 'tools/build_qt_ffmpeg.py', 'tools/verify_qt_ffmpeg_wakeup.py', 'tools/build_ubuntu_deb.py', 'tools/source_cache.py', 'cmake/strip_codec_rpath.cmake', 'packaging/verify-fresh-build.sh') }}
       - name: Build and test from a clean Ubuntu 24.04 image
         env:
           VERSION: ${{ needs.preflight.outputs.version }}

@@ -15,6 +15,7 @@ import tarfile
 from source_cache import add_source_arguments, fetch_archive
 from runtime_profiles import (PROFILES, add_runtime_profile_argument, profile_work_dir,
                               configured_qt_version, verify_ffmpeg_sonames)
+from verify_qt_ffmpeg_wakeup import qualify as qualify_demuxer_wakeup
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -148,6 +149,11 @@ def main():
     cache = (build / "CMakeCache.txt").read_text()
     if configured_qt_version(cache) != spec["version"]:
         raise RuntimeError(f"Runtime profile requires exact Qt {spec['version']}")
+    wakeup_qualification = None
+    if args.runtime_profile == "ubuntu-6.4.2":
+        wakeup_qualification = qualify_demuxer_wakeup(
+            source, work / "qt-ffmpeg-wakeup-qualification", jobs=args.jobs,
+            environment=env, prefixes=prefixes)
     subprocess.run(["cmake", "--build", str(build), "--target", "QFFmpegMediaPlugin",
                     "--parallel", str(args.jobs)], env=env, check=True)
     plugins = list((build / "lib").rglob("libffmpegmediaplugin.so"))
@@ -182,6 +188,7 @@ def main():
         "patches": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest()
                     for p in spec["patches"]},
         "bytes": output.stat().st_size, "configure": command,
+        "wakeup_qualification": wakeup_qualification,
     }, indent=2) + "\n")
     print(f"Private FFmpeg runtime ({variant}): {output}")
 
