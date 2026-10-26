@@ -22,8 +22,6 @@ Licasa is an image viewer and editor for the Linux desktop inspired by Google's 
 - Open JPEG, PNG, TIFF, WebP, HEIC/HEIF, JPEG XL, AVIF, JPEG 2000, and RAW previews.
 - Play Motion Photos and animated APNG files.
 
-**0.8.1 is in preparation.** It repairs Debian Trixie installation and file dialogs, adds a separate Debian-native package, and strengthens package regression checks. It has not been published; the download examples below still refer to the published 0.8.0 files.
-
 If you try it, [report a bug or suggest a feature](https://github.com/sanxchep/licasa/issues/new).
 
 ## In action
