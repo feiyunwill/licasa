@@ -1211,6 +1211,7 @@ Window {
 
         currentImageUrl = null
         residentImageUrl = null
+        imageViewport.externalOpenFailed = false
         naturalImageSize = Qt.size(0, 0)
         displayedNaturalImageSize = Qt.size(0, 0)
         currentFileName = ""
@@ -1387,8 +1388,21 @@ Window {
     }
 
     function loadImageUrl(u, replaceCurrent) {
-        if (!FileUrls.isLocal(u) || !formatSupport.canOpen(u))
+        if (!FileUrls.isLocal(u))
             return
+        if (!formatSupport.canOpen(u)) {
+            notificationCenter.startSession()
+            notificationCenter.finish("image", "error", "Image could not be opened",
+                                      "Choose a supported local image file.")
+            if (!hasAssignedImage()) {
+                imageViewport.externalOpenFailed = true
+                if (root.pendingImageReveal)
+                    root.revealLoadedImage()
+                root.scheduleOpenActionFocus()
+            }
+            return
+        }
+        imageViewport.externalOpenFailed = false
 
         if (replaceCurrent !== true) {
             browseAwaitingFrame = false
@@ -1402,7 +1416,9 @@ Window {
             browseBurstActive = false
         }
 
-        if (!replaceCurrent && hasAssignedImage() && imageViewport.imageStatus !== Image.Error) {
+        if (!replaceCurrent && hasAssignedImage() && imageViewport.imageStatus !== Image.Error
+                && (String(residentImageUrl) !== String(windowManager.defaultImageUrl)
+                    || editorHasAdjustments)) {
             windowManager.openInNewWindow(u)
             return
         }
@@ -1692,12 +1708,18 @@ Window {
         dialogFocusTarget = activeFocusItem
     }
 
+    function scheduleOpenActionFocus() {
+        openActionFocusTimer.restart()
+    }
+
     function restoreDialogFocus() {
         const target = dialogFocusTarget
         dialogFocusTarget = null
         Qt.callLater(function() {
             if (target && target.visible && target.enabled)
                 target.forceActiveFocus(Qt.OtherFocusReason)
+            else if (!root.hasImage() && imageViewport.focusOpenAction())
+                return
             else
                 root.contentItem.forceActiveFocus(Qt.OtherFocusReason)
         })
@@ -2364,6 +2386,8 @@ Window {
         if (root.visible) {
             notificationCenter.startSession()
             visibilitySyncTimer.restart()
+            if (!root.hasAssignedImage())
+                root.scheduleOpenActionFocus()
         } else {
             stopMotionPhotoPlaybackForLifecycle()
             resourceReleaseTimer.restart()
@@ -2371,7 +2395,20 @@ Window {
         }
     }
 
+    // An initial rejected file can reveal the window during component setup,
+    // before the desktop activates its native surface. Restore the empty/retry
+    // action after activation as well as after ordinary bare-launch visibility.
+    onActiveChanged: {
+        if (root.active)
+            root.scheduleOpenActionFocus()
+    }
+
     Shortcut { enabled: !root.fileDialogVisible; sequence: "Ctrl+O"; onActivated: root.openFileDialog() }
+    Shortcut {
+        enabled: !root.fileDialogVisible
+        sequence: "Ctrl+,"
+        onActivated: fullscreenSideMenu.panelOpen = !fullscreenSideMenu.panelOpen
+    }
     Shortcut { enabled: !root.fileDialogVisible; sequence: "Ctrl+S"; onActivated: root.saveCurrentImage() }
     Shortcut { enabled: !root.fileDialogVisible; sequence: "Ctrl+Shift+S"; onActivated: root.openSaveAsDialog() }
 
@@ -2608,6 +2645,7 @@ Window {
         windowedTransparencyCheckerboardEnabled: root.windowedTransparencyCheckerboardEnabled
         windowedTransparencyOpacity: root.windowedTransparencyOpacity
         hasImage: root.hasImage()
+        imageAccessibleName: root.displayedFileName || root.currentFileName
 
         imageX: root.imageX()
         imageY: root.imageY()
@@ -2773,6 +2811,8 @@ Window {
                                           : root.currentFileName)
             if (root.pendingImageReveal)
                 root.revealLoadedImage()
+            if (!previewAvailable)
+                root.scheduleOpenActionFocus()
         }
 
         onZoomRequested: function(factor, px, py) {
@@ -3111,6 +3151,8 @@ Window {
         onPanelOpenChanged: {
             if (panelOpen)
                 notificationCenter.historyOpen = false
+            else if (!root.hasAssignedImage())
+                root.scheduleOpenActionFocus()
         }
         cornerControlSize: root.cornerControlSize
         cornerControlMargin: root.cornerControlMargin
@@ -3496,6 +3538,18 @@ Window {
         interval: 0
         repeat: false
         onTriggered: root.recoverFullscreenImageIfLost()
+    }
+
+    Timer {
+        id: openActionFocusTimer
+        interval: 0
+        repeat: false
+        onTriggered: {
+            if (root.visible && !root.hasImage() && !root.fileDialogVisible
+                    && !fullscreenSideMenu.panelOpen && !notificationCenter.historyOpen
+                    && !root.editPanelOpen)
+                imageViewport.focusOpenAction()
+        }
     }
 
     Timer {

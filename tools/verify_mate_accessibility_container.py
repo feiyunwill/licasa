@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,6 +24,7 @@ chmod 755 /tmp/Licasa.AppImage
 Xvfb :93 -ac -screen 0 1360x900x24 -nolisten tcp >/reports/xvfb.log 2>&1 &
 xvfb_pid=$!
 cleanup() {
+    chmod -R a+rX /reports/speechd 2>/dev/null || true
     kill "$xvfb_pid" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
@@ -44,7 +46,19 @@ while ! pgrep -x marco >/dev/null && [ "$attempt" -lt 80 ]; do
 done
 pgrep -x mate-session >/dev/null
 pgrep -x marco >/dev/null
-orca --replace --disable speech --disable braille --debug-file /reports/orca-debug.log >/reports/orca.log 2>&1 &
+# A dummy Speech Dispatcher output accepts the real Orca speech requests. Its
+# debug log retains the generated utterances without requiring audio hardware.
+mkdir -p "$HOME/speechd/modules" /reports/speechd
+: > "$HOME/speechd/modules/dummy.conf"
+cat > "$HOME/speechd/speechd.conf" <<'EOF'
+AddModule "dummy" "sd_dummy" "dummy.conf"
+DefaultModule "dummy"
+LogLevel 5
+AudioOutputMethod "alsa"
+AudioALSADevice "null"
+EOF
+speech-dispatcher -d -t 0 -C "$HOME/speechd" -L /reports/speechd >/reports/speech-dispatcher.log 2>&1
+orca --replace --enable speech --disable braille --debug-file /reports/orca-debug.log >/reports/orca.log 2>&1 &
 orca_pid=$!
 python3 /qualification/tools/verify_desktop_accessibility.py --app /tmp/squashfs-root/AppRun --sample /samples/photo.png --output /reports/desktop.json
 status=$?
@@ -74,7 +88,7 @@ def main() -> int:
     report = {"schema_version": 1, "kind": "accessibility", "target_id": "debian13-mate-accessibility",
               "status": "failed", "artifact_sha256": digest(artifact), "scenarios": [],
               "desktop": "MATE", "session": "virtual MATE X11", "protocol": "x11", "image": args.image,
-              "coverage_limits": ["Orca runs with speech/braille disabled: this validates event processing, not audible announcement order.",
+              "coverage_limits": ["Orca speech is enabled with dummy output: generated speech is checked, but listening and real audio hardware acceptance remain required.",
                                   "This is an actual MATE session on a virtual X11 display, without physical GPU or display-manager login coverage."]}
     try:
         if not args.skip_build:
@@ -120,6 +134,22 @@ def main() -> int:
         if not orca.exists() or not orca.stat().st_size:
             raise RuntimeError("Orca did not produce its event/debug log")
         orca_text = orca.read_text(errors="replace")
+        utterances = re.findall(r"SPEECH OUTPUT: '([^']*)'", orca_text)
+        (raw / "orca-utterances.json").write_text(json.dumps(utterances, indent=2) + "\n")
+        if not utterances:
+            raise RuntimeError("Orca did not generate any speech output")
+        numeric_tails = [value for value in utterances
+                         if re.search(r"[.,]\d{6,}|(?:nine\s*){4,}|9{6,}", value, re.IGNORECASE)]
+        if numeric_tails:
+            raise RuntimeError("Orca generated numeric speech tails: " + repr(numeric_tails))
+        missing_values = [value for value in ("10", "-10", "0") if value not in utterances]
+        if missing_values:
+            raise RuntimeError("Orca did not speak required adjustment values: " + repr(missing_values))
+        report["orca_speech"] = {"output": "Speech Dispatcher dummy", "utterances": utterances,
+                                 "numeric_tails": numeric_tails,
+                                 "checked_adjustment_values": ["10", "-10", "0"]}
+        report["scenarios"].append({"name": "orca_generated_adjustment_speech_is_readable", "status": "passed",
+                                    "detail": "Orca spoke clean positive, negative and zero values, without long decimal tails."})
         observed = {name: name in orca_text for name in
                     ("Open image", "Exposure", "Save edited image as", "Image could not be opened")}
         if not all(observed.values()):

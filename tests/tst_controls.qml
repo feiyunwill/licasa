@@ -762,6 +762,32 @@ Item {
         compare(formatSpy.signalArguments[0][0], "jpeg")
     }
 
+    function test_originalComparisonSupportsAccessibleToggleAndKeyboardRelease() {
+        const editor = createControl(editorSidePanelComponent)
+        editor.panelOpen = true
+        editor.activeTool = "adjust"
+        const button = findChild(editor, "editorOriginalCompareButton")
+        verify(button)
+        const pressed = createSpy(editor, "compareOriginalPressed")
+        const released = createSpy(editor, "compareOriginalReleased")
+
+        compare(button.Accessible.checkable, true)
+        button.Accessible.toggleAction()
+        compare(pressed.count, 1)
+        editor.compareOriginal = true
+        compare(button.Accessible.checked, true)
+        button.Accessible.toggleAction()
+        compare(released.count, 1)
+
+        editor.compareOriginal = false
+        button.forceActiveFocus()
+        keyPress(Qt.Key_Space)
+        compare(pressed.count, 2)
+        keyRelease(Qt.Key_Space)
+        compare(released.count, 2)
+        compare(button.heldByKeyboard, false)
+    }
+
     function test_editorTabsRequestWorkspaceRefit() {
         const composition = createControl(editorCropCompositionComponent)
         const editor = composition.editorPanel
@@ -818,28 +844,69 @@ Item {
         tryVerify(function() { return exportTab.activeFocus })
     }
 
-    function test_emptyImageStateFitsAndOpensWithKeyboard() {
+    function test_nullViewportHasNoWelcomePanel() {
         const viewport = createTemporaryObject(imageViewportComponent, visualRoot, {
-            "providerSource": "",
-            "hasImage": false,
-            "width": 190,
-            "height": 130
+            "providerSource": "", "hasImage": false, "width": 460, "height": 220
+        })
+        verify(viewport)
+        compare(viewport.imageStatus, Image.Null)
+        compare(findChild(viewport, "emptyImageState").visible, false)
+        compare(findChild(viewport, "welcomeLogo"), null)
+        compare(findChild(viewport, "welcomeSettingsButton"), null)
+        compare(viewport.focusOpenAction(), false)
+    }
+
+    function test_failedImageRetryFitsAndOpensWithKeyboard() {
+        const viewport = createTemporaryObject(imageViewportComponent, visualRoot, {
+            "providerSource": "", "hasImage": false, "width": 190, "height": 130,
+            "externalOpenFailed": true
         })
         verify(viewport)
         const card = findChild(viewport, "emptyImageState")
         const button = findChild(viewport, "emptyStateOpenButton")
-        verify(card)
-        verify(button)
+        compare(viewport.imageStatus, Image.Error)
         verify(card.visible)
         verify(card.width <= viewport.width - 24)
         verify(card.height <= viewport.height - 24)
-
-        const openRequested = createSpy(viewport, "openDialogRequested")
-        button.forceActiveFocus()
+        const position = button.mapToItem(card, 0, 0)
+        verify(position.y >= 0)
+        verify(position.y + button.height <= card.height)
+        const requested = createSpy(viewport, "openDialogRequested")
+        compare(viewport.focusOpenAction(), true)
+        compare(button.activeFocus, true)
         keyClick(Qt.Key_Return)
-        compare(openRequested.count, 1)
-
+        compare(requested.count, 1)
         viewport.width = 100
+        compare(card.visible, false)
+        compare(viewport.focusOpenAction(), false)
+    }
+
+    function test_loadingFailureAndRealImageStayDistinct() {
+        const viewport = createTemporaryObject(imageViewportComponent, visualRoot, {
+            "providerSource": "", "hasImage": false, "width": 460, "height": 220
+        })
+        verify(viewport)
+        const card = findChild(viewport, "emptyImageState")
+        const title = findChild(viewport, "emptyStateTitle")
+        const button = findChild(viewport, "emptyStateOpenButton")
+        compare(card.visible, false)
+        viewport.externalOpenFailed = true
+        wait(20)
+        compare(viewport.imageStatus, Image.Error)
+        verify(card.visible)
+        verify(button.visible)
+        viewport.externalOpenFailed = false
+        compare(card.visible, false)
+        viewport.providerSource = Qt.resolvedUrl("test-assets/broken/empty.png").toString()
+        compare(viewport.imageStatus, Image.Loading)
+        compare(title.text, "Opening image…")
+        compare(button.visible, false)
+        tryCompare(viewport, "imageStatus", Image.Error)
+        compare(title.text, "That image could not be opened")
+        compare(button.visible, true)
+        compare(viewport.focusOpenAction(), true)
+        viewport.providerSource = Qt.resolvedUrl("../assets/licasa.png").toString()
+        tryCompare(viewport, "imageStatus", Image.Ready)
         compare(card.visible, false)
     }
 

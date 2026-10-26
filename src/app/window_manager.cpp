@@ -17,7 +17,9 @@
 #include <QColor>
 #include <QCoreApplication>
 #include <QDebug>
+#include <QDir>
 #include <QEvent>
+#include <QFileInfo>
 #include <QImage>
 #include <QKeyEvent>
 #include <QQmlApplicationEngine>
@@ -58,6 +60,21 @@ WindowManager::WindowManager(QQmlApplicationEngine* engine, QVariantMap sharedWi
 {}
 
 WindowManager::~WindowManager() { destroyAllWindows(); }
+
+QUrl WindowManager::defaultImageUrl() const
+{
+    const QDir applicationDirectory(QCoreApplication::applicationDirPath());
+    for (const auto* relativePath : {
+             "../share/licasa/images/licasa-4096x4096.png",
+             "generated/default-image/licasa-4096x4096.png",
+         }) {
+        const QFileInfo image(applicationDirectory.filePath(QString::fromLatin1(relativePath)));
+        if (image.isFile()) {
+            return QUrl::fromLocalFile(image.absoluteFilePath());
+        }
+    }
+    return {};
+}
 
 bool WindowManager::eventFilter(QObject* watched, QEvent* event)
 {
@@ -109,7 +126,12 @@ bool WindowManager::createWindow(const QUrl& initialUrl, bool startHidden, bool 
         return false;
     }
 
-    auto session = std::make_unique<WindowSession>(initialUrl, startHidden, persistentShell);
+    const QUrl imageUrl = initialUrl.isEmpty() && !startHidden ? defaultImageUrl() : initialUrl;
+    if (initialUrl.isEmpty() && !startHidden && imageUrl.isEmpty()) {
+        qCritical() << "The bundled default Licasa image is missing.";
+        return false;
+    }
+    auto session = std::make_unique<WindowSession>(imageUrl, startHidden, persistentShell);
     // Phone-media metadata is intentionally per-window and lazy. A window can
     // cancel its own bounded metadata probe during rapid navigation without
     // interfering with another image window.
@@ -308,7 +330,9 @@ bool WindowManager::openInNewWindow(const QUrl& url)
         }
 
         const QUrl residentUrl = window->property("residentImageUrl").toUrl();
-        if (!window->isVisible() || residentUrl.isEmpty()) {
+        const bool uneditedDefault =
+            residentUrl == defaultImageUrl() && !window->property("editorHasAdjustments").toBool();
+        if (!window->isVisible() || residentUrl.isEmpty() || uneditedDefault) {
             session->requestOpen(url);
             return true;
         }
@@ -422,6 +446,14 @@ void WindowManager::showAnyWindow()
             continue;
         }
 
+        if (window->property("residentImageUrl").toUrl().isEmpty()) {
+            auto* session =
+                window->findChild<WindowSession*>(QString(), Qt::FindDirectChildrenOnly);
+            if (session) {
+                session->requestOpen(defaultImageUrl());
+                return;
+            }
+        }
         window->show();
         window->raise();
         window->requestActivate();

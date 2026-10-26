@@ -1,6 +1,6 @@
 import QtQuick
 
-Item {
+FocusScope {
     id: root
 
     required property string label
@@ -44,20 +44,40 @@ Item {
     }
 
     height: 48
-    activeFocusOnTab: true
 
-    // Qt's accessibility value interface reads these conventional properties.
-    readonly property real minimumValue: from
-    readonly property real maximumValue: to
-    readonly property real stepSize: keyboardStep
-
-    Accessible.role: Accessible.Slider
-    Accessible.name: label
-    Accessible.description: displayText(value)
-    Accessible.focusable: true
-    Accessible.focused: activeFocus
-    Accessible.onIncreaseAction: root.commitValue(root.value + root.keyboardStep)
-    Accessible.onDecreaseAction: root.commitValue(root.value - root.keyboardStep)
+    // Qt 6.4/6.8 read the item's conventional "value" property directly.
+    // Keep the precise edit value on root, and expose whole displayed percent
+    // units on a separate focus surface. Orca otherwise speaks the complete
+    // binary floating-point tail of values such as 0.09999999999999999.
+    Item {
+        id: accessibleSlider
+        objectName: "adjustmentAccessibleSlider"
+        anchors.fill: parent
+        focus: true
+        activeFocusOnTab: enabled && visible
+        property int value: 0
+        readonly property int minimumValue: Math.round(root.from * 100)
+        readonly property int maximumValue: Math.round(root.to * 100)
+        readonly property real stepSize: root.keyboardStep * 100
+        Accessible.role: Accessible.Slider
+        Accessible.name: root.label
+        Accessible.description: "Value in percent"
+        Accessible.focusable: activeFocusOnTab
+        Accessible.focused: activeFocus
+        Accessible.onIncreaseAction: root.commitValue(root.value + root.keyboardStep)
+        Accessible.onDecreaseAction: root.commitValue(root.value - root.keyboardStep)
+        onValueChanged: {
+            const displayed = Math.round(root.value * 100)
+            if (value === displayed) return
+            root.commitValue(value / 100)
+            value = Math.round(root.value * 100)
+        }
+        Binding {
+            target: accessibleSlider
+            property: "value"
+            value: Math.round(root.value * 100)
+        }
+    }
 
     Keys.onPressed: function(event) {
         if (event.key === Qt.Key_Left || event.key === Qt.Key_Down)
@@ -76,6 +96,7 @@ Item {
         anchors.left: parent.left
         anchors.top: parent.top
         text: root.label
+        Accessible.ignored: true
         color: "white"
         font.pixelSize: 12
         font.weight: Font.Medium
@@ -90,6 +111,7 @@ Item {
         Text {
             anchors.verticalCenter: parent.verticalCenter
             text: root.displayText(root.value)
+            Accessible.ignored: true
             color: root.changed ? "#E8FFFFFF" : "#A8FFFFFF"
             font.pixelSize: 12
             font.weight: root.changed ? Font.Medium : Font.Normal
@@ -97,17 +119,38 @@ Item {
         }
 
         Rectangle {
+            id: resetButton
+            objectName: "adjustmentResetButton"
             visible: root.changed
             width: 22
             height: 22
             radius: 11
             color: resetMouse.containsMouse ? "#24FFFFFF" : "#12FFFFFF"
-            border.width: 1
-            border.color: "#20FFFFFF"
+            border.width: activeFocus ? 2 : 1
+            border.color: activeFocus ? "#E8FFFFFF" : "#20FFFFFF"
+            activeFocusOnTab: enabled && visible
+            Accessible.role: Accessible.Button
+            Accessible.name: "Reset " + root.label
+            Accessible.focusable: activeFocusOnTab
+            Accessible.focused: activeFocus
+            Accessible.onPressAction: {
+                accessibleSlider.forceActiveFocus()
+                root.commitValue(root.defaultValue)
+            }
+            Keys.onPressed: function(event) {
+                if (event.key !== Qt.Key_Space && event.key !== Qt.Key_Return
+                        && event.key !== Qt.Key_Enter) return
+                if (!event.isAutoRepeat) {
+                    accessibleSlider.forceActiveFocus()
+                    root.commitValue(root.defaultValue)
+                }
+                event.accepted = true
+            }
 
             Text {
                 anchors.centerIn: parent
                 text: "↺"
+                Accessible.ignored: true
                 color: "#D8FFFFFF"
                 font.pixelSize: 12
                 renderType: Text.NativeRendering
@@ -118,7 +161,10 @@ Item {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.commitValue(root.defaultValue)
+                onClicked: {
+                    accessibleSlider.forceActiveFocus()
+                    root.commitValue(root.defaultValue)
+                }
             }
         }
     }

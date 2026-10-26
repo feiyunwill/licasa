@@ -20,7 +20,7 @@ import tempfile
 import time
 
 REQUIRED_SCENARIOS = {
-    "open_button_visible_fallback", "picker_blocks_background_shortcuts", "cancel_returns_focus",
+    "keyboard_open_visible_fallback", "picker_blocks_background_shortcuts", "cancel_returns_focus",
     "ctrl_o_reopens_visible_fallback", "accepted_photo_displayed",
     "save_as_visible_fallback", "save_cancel_creates_no_output", "save_as_output_decodes",
     "lazy_FrameSaveDialog_visible", "lazy_MotionExportDialog_visible",

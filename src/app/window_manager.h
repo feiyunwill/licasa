@@ -49,11 +49,14 @@ class WindowSession final : public QObject {
 
 class WindowManager final : public QObject {
     Q_OBJECT
+    Q_PROPERTY(QUrl defaultImageUrl READ defaultImageUrl CONSTANT)
 
   public:
     WindowManager(QQmlApplicationEngine* engine, QVariantMap sharedWindowProperties,
                   QObject* parent = nullptr);
     ~WindowManager() override;
+
+    QUrl defaultImageUrl() const;
 
     void setMotionPhotoResourcePolicy(MotionPhotoResourcePolicy* resourcePolicy) noexcept;
     void setImageResourcePolicy(ImageResourcePolicy* resourcePolicy) noexcept;

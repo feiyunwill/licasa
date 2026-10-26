@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # and the crypto/Kerberos dependency closure on minimal Debian desktops.
 PORTABLE_RUNTIME_LIBRARIES = ("libSM.so.6", "libICE.so.6", "libuuid.so.1", "libfribidi.so.0",
                               "libgpg-error.so.0", "libcom_err.so.2")
+GTK_PLATFORM_THEME = "platformthemes/libqgtk3.so"
+GTK_SETTINGS_MODULE = "gio/modules/libdconfsettings.so"
 TOOLS = {
     "linuxdeploy-x86_64.AppImage": (
         "https://github.com/linuxdeploy/linuxdeploy/releases/download/"
@@ -103,6 +105,22 @@ def set_qml_plugin_runpaths(appdir: Path) -> None:
             run(["patchelf", "--set-rpath", f"$ORIGIN/{relative}:$ORIGIN", str(plugin)])
 
 
+def preserve_desktop_theme_selection(appdir: Path) -> None:
+    # The pinned deployer's hook unconditionally sets gtk3 on GNOME/XFCE,
+    # overriding an explicit user setting and preventing a deliberate fallback.
+    # The hook contains only that theme override; Qt already detects GTK
+    # desktops (including MATE) and respects QT_QPA_PLATFORMTHEME itself.
+    hook = appdir / "apprun-hooks/linuxdeploy-plugin-qt-hook.sh"
+    if not hook.is_file():
+        raise RuntimeError("AppDir is missing its Qt runtime hook")
+    # GIO modules are an extension of our bundled GLib ABI. Newer host GVFS
+    # modules can fail to resolve symbols against it; retain the matching dconf
+    # settings backend and do not import unrelated host GIO modules.
+    hook.write_text("# Licasa: Qt selects its desktop theme; use matching bundled GIO modules.\n"
+                    'export GIO_MODULE_DIR="$this_dir/usr/lib/licasa/gio/modules"\n'
+                    "unset GIO_EXTRA_MODULES\n")
+
+
 def pin_multimedia_backend(appdir: Path) -> dict:
     """Every Qt plugin search order must select the qualified private backend."""
     private = appdir / "usr/lib/licasa/plugins/multimedia/libffmpegmediaplugin.so"
@@ -150,6 +168,12 @@ def main() -> None:
     qt_version = subprocess.check_output(["qmake6", "-query", "QT_VERSION"], text=True).strip()
     if qt_version != "6.4.2":
         raise RuntimeError("The portable Ubuntu payload must be deployed with matching Qt 6.4.2")
+    gtk_theme = qt_plugins / GTK_PLATFORM_THEME
+    if not gtk_theme.is_file():
+        raise RuntimeError("Missing matching Qt GTK platform theme; install qt6-gtk-platformtheme")
+    gtk_settings = qt_libraries / GTK_SETTINGS_MODULE
+    if not gtk_settings.is_file():
+        raise RuntimeError("Missing matching GTK settings backend; install dconf-gsettings-backend")
     # This also rejects a partially installed build environment before any bundle is made.
     validate_runtime(qt_qml, qt_libraries, qt_version)
     wayland_platforms = ("libqwayland-egl.so", "libqwayland-generic.so")
@@ -190,6 +214,16 @@ def main() -> None:
         # dependency scanner runs.
         for group in wayland_plugin_groups:
             shutil.copytree(qt_plugins / group, appdir / "usr/plugins" / group)
+        # A QML FileDialog selects native GTK dialogs through this plugin, not
+        # through its QML imports. Copy the matching build-runtime plugin before
+        # linuxdeploy scans ELF dependencies, including GTK on minimal systems.
+        # Leave theme selection to Qt/the desktop; never load host Qt plugins.
+        bundled_gtk_theme = appdir / "usr/plugins" / GTK_PLATFORM_THEME
+        bundled_gtk_theme.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(gtk_theme, bundled_gtk_theme)
+        bundled_gtk_settings = appdir / "usr/lib/licasa" / GTK_SETTINGS_MODULE
+        bundled_gtk_settings.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(gtk_settings, bundled_gtk_settings)
         stage_qml_modules(qt_qml, appdir)
         env = os.environ.copy()
         env.update(APPIMAGE_EXTRACT_AND_RUN="1", QML_SOURCES_PATHS=str(ROOT / "qml"),
@@ -199,9 +233,14 @@ def main() -> None:
         linuxdeploy = str(tools_dir / "linuxdeploy-x86_64.AppImage")
         run([linuxdeploy, "--appdir", str(appdir), "--desktop-file", str(desktop),
              "--icon-file", str(icon),
+             "--deploy-deps-only", str(bundled_gtk_theme),
+             "--deploy-deps-only", str(bundled_gtk_settings),
              *(argument for library in forced_libraries for argument in ("--library", str(library))),
              "--plugin", "qt"], env=env, cwd=work)
+        preserve_desktop_theme_selection(appdir)
         set_wayland_plugin_runpaths(appdir, wayland_plugin_groups)
+        set_wayland_plugin_runpaths(appdir, ("platformthemes",))
+        run(["patchelf", "--set-rpath", "$ORIGIN/../../..:$ORIGIN", str(bundled_gtk_settings)])
         set_qml_plugin_runpaths(appdir)
         multimedia = pin_multimedia_backend(appdir)
         # Explicit --library requests override linuxdeploy's default exclusion
@@ -246,6 +285,19 @@ def main() -> None:
             raise RuntimeError("AppDir is missing the bundled JPEG 2000 reader")
         shutil.copy2(jp2_library, jp2_plugin.parent / jp2_library.name)
         runtime_report = validate_runtime(appdir / "usr/qml", appdir / "usr/lib", qt_version)
+        if not bundled_gtk_theme.is_file():
+            raise RuntimeError("AppDir is missing its matching Qt GTK platform theme")
+        for library in ("libgtk-3.so.0", "libgdk-3.so.0", "libpangoft2-1.0.so.0"):
+            if not (appdir / "usr/lib" / library).is_file():
+                raise RuntimeError(f"AppDir is missing a GTK runtime library: {library}")
+        runtime_report["native_file_dialog"] = {
+            "provider": "gtk3", "qt_version": qt_version,
+            "plugin": str(bundled_gtk_theme.relative_to(appdir)),
+            "sha256": hashlib.sha256(bundled_gtk_theme.read_bytes()).hexdigest(),
+            "selection": "desktop default; Qt Quick fallback remains available",
+            "settings_module": str(bundled_gtk_settings.relative_to(appdir)),
+            "settings_sha256": hashlib.sha256(bundled_gtk_settings.read_bytes()).hexdigest(),
+        }
         runtime_report["multimedia_backend"] = multimedia
         report_path = appdir / "usr/share/licasa/qt-runtime.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)

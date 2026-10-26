@@ -643,6 +643,8 @@ function(licasa_add_qml target_name)
 endfunction()
 licasa_add_qml(licasa)
 qt_add_resources(licasa "licasa_app_icon" PREFIX "/" FILES assets/licasa.png)
+configure_file(assets/licasa-4096x4096.png
+        generated/default-image/licasa-4096x4096.png COPYONLY)
 
 # Link only the Qt modules actually used by this app.
 target_link_libraries(licasa PRIVATE
@@ -764,6 +766,9 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/licasa.desktop"
 )
 
 # Install the application icon for desktop launchers and icon themes.
+install(FILES assets/licasa-4096x4096.png
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licasa/images
+)
 install(FILES assets/licasa.png
         DESTINATION ${CMAKE_INSTALL_DATADIR}/pixmaps
 )

@@ -15,6 +15,7 @@
 
 import QtQuick
 import "ViewerMath.js" as ViewerMath
+import "components"
 
 Item {
     id: root
@@ -26,6 +27,7 @@ Item {
     required property bool windowedTransparencyCheckerboardEnabled
     required property real windowedTransparencyOpacity
     required property bool hasImage
+    property string imageAccessibleName: ""
 
     required property real imageX
     required property real imageY
@@ -98,6 +100,9 @@ Item {
     readonly property bool speculativeFullAvailable: speculativeFullKey.length > 0
         && (photoC.status === Image.Loading || photoC.status === Image.Ready)
     property bool imageLoadFailed: false
+    // Rejected file types never enter the decoder, whose empty-source cleanup
+    // must not erase the actionable failure shown for that open request.
+    property bool externalOpenFailed: false
     readonly property bool decodePending: imageRequestTimer.running || pendingImageSlot >= 0
     readonly property int progressiveFadeDurationMs: 120
 
@@ -172,7 +177,7 @@ Item {
         ? Image.Ready
         : pendingImage
             ? pendingImage.status
-            : (imageLoadFailed ? Image.Error
+            : (imageLoadFailed || externalOpenFailed ? Image.Error
                 : providerSource.length > 0 ? Image.Loading : Image.Null)
     readonly property bool animatedFrameReady: animatedPlaybackActive
         && animatedPhoto.status === Image.Ready
@@ -233,6 +238,13 @@ Item {
     signal imageRequestFailed()
     signal playbackToggleRequested()
     signal pixelSampleRequested(real viewportX, real viewportY, int pixelX, int pixelY)
+
+    function focusOpenAction() {
+        if (!emptyState.visible || !openImageButton.visible)
+            return false
+        openImageButton.forceActiveFocus(Qt.OtherFocusReason)
+        return true
+    }
 
     function requestHoveredPixelSample() {
         if (pixelGridVisible && hoveredPixelX >= 0 && hoveredPixelY >= 0
@@ -689,6 +701,9 @@ Item {
     Item {
         id: imageStage
         objectName: "imageStage"
+        Accessible.role: Accessible.Graphic
+        Accessible.name: root.imageAccessibleName
+        Accessible.ignored: root.presentationOnly || !root.hasImage
         visible: root.imageStatus === Image.Ready
         x: root.renderedImageX
         y: root.renderedImageY
@@ -997,7 +1012,8 @@ Item {
         objectName: "emptyImageState"
         anchors.centerIn: parent
         readonly property bool compact: root.width < 320 || root.height < 200
-        visible: !root.presentationOnly && root.imageStatus !== Image.Ready
+        visible: !root.presentationOnly
+            && (root.imageStatus === Image.Loading || root.imageStatus === Image.Error)
             && root.width >= 180 && root.height >= 110
         z: 20
         width: Math.min(420, Math.max(0, parent.width - 24))
@@ -1009,10 +1025,14 @@ Item {
         antialiasing: true
 
         Column {
+            id: emptyStateContent
             anchors.centerIn: parent
             spacing: emptyState.compact ? 8 : 14
 
             Text {
+                objectName: "emptyStateTitle"
+                Accessible.role: Accessible.StaticText
+                Accessible.name: text
                 anchors.horizontalCenter: parent.horizontalCenter
                 color: "#f2f2f2"
                 font.pixelSize: emptyState.compact ? 16 : 20
@@ -1024,18 +1044,16 @@ Item {
                     : root.imageStatus === Image.Error
                         ? emptyState.compact ? "Open failed"
                                              : "That image could not be opened"
-                        : emptyState.compact ? "Open an image" : "Drop an image here"
+                        : ""
             }
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                visible: !emptyState.compact && root.imageStatus !== Image.Loading
+                visible: !emptyState.compact && root.imageStatus === Image.Error
                 color: Qt.rgba(1, 1, 1, 0.68)
                 font.pixelSize: 12
                 renderType: Text.NativeRendering
-                text: root.imageStatus === Image.Error
-                    ? "Choose another local image file"
-                    : "or choose one from your computer"
+                text: "Choose another local image file"
             }
 
             Rectangle {
@@ -1049,10 +1067,13 @@ Item {
                 color: openButton.pressed ? "#2466D8" : openButton.containsMouse ? "#347CF2" : "#2A72E8"
                 border.width: activeFocus ? 2 : 1
                 border.color: activeFocus ? "#D8FFFFFF" : "#50FFFFFF"
-                activeFocusOnTab: visible
+                activeFocusOnTab: true
 
                 Accessible.role: Accessible.Button
                 Accessible.name: "Open image"
+                Accessible.description: root.imageStatus === Image.Error
+                    ? "That image could not be opened. Choose another local image file. Shortcut: Ctrl+O."
+                    : "Choose an image file to view. Shortcut: Ctrl+O."
                 Accessible.focusable: visible
                 Accessible.focused: activeFocus
                 Accessible.onPressAction: {
@@ -1088,6 +1109,7 @@ Item {
                 }
             }
         }
+
     }
 
     function normalizedWheelDelta(wheel) {

@@ -54,6 +54,17 @@ class NativeGtkQualificationTests(unittest.TestCase):
             with self.subTest(mutate=mutate), self.assertRaisesRegex(RuntimeError, "not proven"):
                 gtk_picker_identity(**changed)
 
+    def test_appimage_native_picker_requires_its_own_plugin_and_gtk(self):
+        bundle = "/tmp/squashfs-root"
+        plugin = bundle + "/usr/plugins/platformthemes/libqgtk3.so"
+        gtk = bundle + "/usr/lib/libgtk-3.so.0"
+        identity = {**self.identity, "expected_plugin": plugin,
+                    "gtk_library_root": bundle + "/usr/lib", "mapped": [plugin, gtk]}
+        gtk_picker_identity(**identity)
+        for mapped in ([self.theme, gtk], [plugin, self.gtk]):
+            with self.subTest(mapped=mapped), self.assertRaisesRegex(RuntimeError, "not proven"):
+                gtk_picker_identity(**{**identity, "mapped": mapped})
+
     def test_direct_gate_rejects_fallback_partial_skipped_and_foreign_runtime(self):
         for mutate in (
             lambda report: report.update(status="unsupported"),

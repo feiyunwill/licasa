@@ -508,6 +508,7 @@ Item {
                             displayMultiplier: 1.0 / 1024.0
                             displayDecimals: 2
                             displaySuffix: " GiB"
+                            accessibleUnit: "MiB"
                             buttonMotionDuration: root.buttonMotionDuration
                             onValueChangedByUser: function(value) {
                                 root.maximumImageMemoryMiBRequested(

@@ -13,10 +13,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import verify_mate_accessibility_container as mate
+import verify_appimage_picker_container as picker
 
 
 class MateWrapperTests(unittest.TestCase):
-    def run_check(self, directory, *, orca=True, cleanup_timeout=False):
+    def run_check(self, directory, *, orca=True, utterances=("10", "-10", "0"), cleanup_timeout=False):
         artifact = directory / "Licasa.AppImage"
         artifact.write_bytes(b"fixture package")
         output = directory / "report.json"
@@ -31,7 +32,9 @@ class MateWrapperTests(unittest.TestCase):
                 (raw / "runtime-formats.json").write_text(json.dumps({"qt_version": "6.4.2", "before_decode": {}}))
                 (raw / "desktop.json").write_text(json.dumps({"status": "passed", "scenarios": []}))
                 if orca:
-                    (raw / "orca-debug.log").write_text("Open image Exposure Save edited image as Image could not be opened")
+                    (raw / "orca-debug.log").write_text(
+                        "Open image Exposure Save edited image as Image could not be opened\n" +
+                        "\n".join(f"SPEECH OUTPUT: '{value}'" for value in utterances))
                 return subprocess.CompletedProcess(command, 0, "", "")
             if cleanup_timeout:
                 raise subprocess.TimeoutExpired(command, 15)
@@ -64,6 +67,25 @@ class MateWrapperTests(unittest.TestCase):
             self.assertIn("timed out", cleanup.read_text())
             self.assertEqual(calls[-1][-1], calls[-2][calls[-2].index("--name") + 1])
 
+    def test_repeated_nine_speech_fails_even_with_correct_accessible_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, report, _ = self.run_check(Path(temporary),
+                utterances=("10", "-10", "0", "0.09999999999999999"))
+            self.assertEqual(result, 1)
+            self.assertIn("numeric speech tails", report["error"])
+
+    def test_event_processing_without_generated_speech_is_insufficient(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, report, _ = self.run_check(Path(temporary), utterances=())
+            self.assertEqual(result, 1)
+            self.assertIn("did not generate any speech", report["error"])
+
+    def test_required_signed_values_must_reach_orca_speech(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, report, _ = self.run_check(Path(temporary), utterances=("10", "0"))
+            self.assertEqual(result, 1)
+            self.assertIn("required adjustment values", report["error"])
+
     def test_downloaded_nonexecutable_candidate_is_copied_without_changing_original(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -89,6 +111,32 @@ class MateWrapperTests(unittest.TestCase):
             self.assertEqual((reports / "extraction.log").read_text(), "extracted")
             self.assertEqual(mate.digest(package), before)
             self.assertEqual(package.stat().st_mode & 0o777, 0o644)
+
+    def test_picker_stages_readonly_nonexecutable_candidate_before_extraction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate.AppImage"
+            candidate.write_text('#!/bin/sh\nset -eu\ntest -x "$0"\ntest "$1" = --appimage-extract\nprintf extracted\n')
+            candidate.chmod(0o444)
+            reports = root / "reports"
+            reports.mkdir()
+            work = root / "work"
+            work.mkdir()
+            before = mate.digest(candidate)
+            setup = picker.SESSION.split('if [ "$LICASA_PICKER_REMOVE_NATIVE"', 1)[0]
+            setup = setup.replace('/candidate.AppImage', str(candidate))
+            setup = setup.replace('/tmp/Licasa.AppImage', str(work / 'Licasa.AppImage'))
+            setup = setup.replace('/reports/extract.log', str(reports / 'extract.log'))
+            setup = setup.replace('cd /tmp', 'cd "' + str(work) + '"')
+            import os
+            subprocess.run(["sh", "-ec", setup], check=True,
+                env=dict(os.environ, HOME=str(root / "home"), XDG_RUNTIME_DIR=str(root / "runtime"),
+                         XDG_CONFIG_HOME=str(root / "config"), XDG_STATE_HOME=str(root / "state"),
+                         XDG_CACHE_HOME=str(root / "cache")))
+            self.assertEqual((reports / "extract.log").read_text(), "extracted")
+            self.assertEqual((work / "Licasa.AppImage").stat().st_mode & 0o777, 0o755)
+            self.assertEqual(mate.digest(candidate), before)
+            self.assertEqual(candidate.stat().st_mode & 0o777, 0o444)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,14 @@ def main():
         parser.error("jobs must be positive")
     executable = args.executable.resolve(strict=True)
     empty = measure(executable, None, 1)
+    if (Path(empty.get("source_image_at_settle", "")).name != "licasa-4096x4096.png"
+            or empty.get("natural_image_width") != 4096
+            or empty.get("natural_image_height") != 4096
+            or empty.get("image_status_at_settle") != 1
+            or not empty.get("assigned_image_at_settle")
+            or empty.get("image_overlay_visible_at_settle")
+            or empty.get("open_button_visible_at_settle")):
+        raise RuntimeError(f"Bare launch did not display the default logo as an image: {empty}")
     baseline_process = empty["idle_after_close_process"]
     baseline_rss = baseline_process["rss_kib"]
     baseline_live = baseline_process.get("malloc_live_kib")

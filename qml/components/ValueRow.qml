@@ -1,6 +1,6 @@
 import QtQuick
 
-Item {
+FocusScope {
     id: root
 
     required property string title
@@ -12,6 +12,10 @@ Item {
     property real displayMultiplier: 100.0
     property int displayDecimals: 0
     property string displaySuffix: "%"
+    // Whole displayed units avoid numeric tails in older Qt/AT-SPI bridges.
+    // Fractional displays can keep whole model units (for example MiB for GiB).
+    property real accessibleMultiplier: displayDecimals === 0 ? displayMultiplier : 1.0
+    property string accessibleUnit: displayDecimals === 0 ? displaySuffix : ""
     property int buttonMotionDuration: 140
 
     signal valueChangedByUser(real value)
@@ -40,20 +44,40 @@ Item {
         + (valueSubtitle.visible ? 2 + valueSubtitle.implicitHeight : 0)
 
     height: Math.max(92, 10 + textHeight + 12 + controls.height + 10)
-    activeFocusOnTab: enabled && visible
-
-    // Qt's accessibility value interface reads these conventional properties.
-    readonly property real minimumValue: from
-    readonly property real maximumValue: to
-    readonly property real stepSize: step
-
-    Accessible.role: Accessible.Slider
-    Accessible.name: title
-    Accessible.description: formattedValue()
-    Accessible.focusable: enabled && visible
-    Accessible.focused: activeFocus
-    Accessible.onIncreaseAction: root.valueChangedByUser(root.clampedValue(root.value + root.step))
-    Accessible.onDecreaseAction: root.valueChangedByUser(root.clampedValue(root.value - root.step))
+    Item {
+        id: accessibleSlider
+        objectName: "settingsAccessibleSlider"
+        anchors.fill: parent
+        focus: true
+        activeFocusOnTab: enabled && visible
+        property int value: 0
+        readonly property int minimumValue: Math.round(root.from * root.accessibleMultiplier)
+        readonly property int maximumValue: Math.round(root.to * root.accessibleMultiplier)
+        readonly property real stepSize: root.step * root.accessibleMultiplier
+        Accessible.role: Accessible.Slider
+        Accessible.name: root.title
+        Accessible.description: {
+            const unit = root.accessibleUnit === "%" ? "Value in percent"
+                : (root.accessibleUnit.length > 0 ? "Value in " + root.accessibleUnit : "")
+            return root.subtitle.length > 0
+                ? root.subtitle + (unit.length > 0 ? ". " + unit : "") : unit
+        }
+        Accessible.focusable: activeFocusOnTab
+        Accessible.focused: activeFocus
+        Accessible.onIncreaseAction: root.valueChangedByUser(root.clampedValue(root.value + root.step))
+        Accessible.onDecreaseAction: root.valueChangedByUser(root.clampedValue(root.value - root.step))
+        onValueChanged: {
+            const displayed = Math.round(root.clampedValue(root.value) * root.accessibleMultiplier)
+            if (value === displayed) return
+            root.valueChangedByUser(root.clampedValue(value / root.accessibleMultiplier))
+            value = Math.round(root.clampedValue(root.value) * root.accessibleMultiplier)
+        }
+        Binding {
+            target: accessibleSlider
+            property: "value"
+            value: Math.round(root.clampedValue(root.value) * root.accessibleMultiplier)
+        }
+    }
 
     Keys.onPressed: function(event) {
         let nextValue = root.value
@@ -91,6 +115,7 @@ Item {
         anchors.top: parent.top
         anchors.topMargin: 10
         text: root.title
+        Accessible.ignored: true
         color: "white"
         font.pixelSize: 14
         font.weight: Font.Medium
@@ -109,6 +134,7 @@ Item {
         anchors.top: valueTitle.bottom
         anchors.topMargin: 2
         text: root.subtitle
+        Accessible.ignored: true
         color: "#B3FFFFFF"
         font.pixelSize: 12
         wrapMode: Text.Wrap
@@ -123,6 +149,7 @@ Item {
         anchors.top: parent.top
         anchors.topMargin: 10
         text: root.formattedValue()
+        Accessible.ignored: true
         color: "#F2FFFFFF"
         font.pixelSize: 13
         font.weight: Font.Medium
@@ -152,6 +179,7 @@ Item {
             Text {
                 anchors.centerIn: parent
                 text: "−"
+                Accessible.ignored: true
                 color: "white"
                 font.pixelSize: 20
                 font.weight: Font.Medium
@@ -216,6 +244,7 @@ Item {
             Text {
                 anchors.centerIn: parent
                 text: "+"
+                Accessible.ignored: true
                 color: "white"
                 font.pixelSize: 18
                 font.weight: Font.Medium
