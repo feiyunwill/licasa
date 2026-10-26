@@ -95,7 +95,7 @@ jobs:
       - name: Check package contracts and qualification regressions
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-pil python3-gi gir1.2-glib-2.0 dbus-daemon libglib2.0-bin patchelf gcc clang-format-18
+          sudo apt-get install -y --no-install-recommends python3-pil python3-gi python3-yaml gir1.2-glib-2.0 dbus-daemon libglib2.0-bin patchelf gcc clang-format-18
           python3 tools/check_code_style.py
           python3 tools/check_support_manifest.py
           /usr/bin/python3 -B -m unittest discover -s tests -p 'test_*.py' -v

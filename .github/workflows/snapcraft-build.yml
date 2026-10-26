@@ -46,7 +46,7 @@ jobs:
       - name: Check installer regressions before building
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-pil python3-gi gir1.2-glib-2.0 patchelf gcc
+          sudo apt-get install -y --no-install-recommends python3-pil python3-gi python3-yaml gir1.2-glib-2.0 patchelf gcc
           /usr/bin/python3 -B tests/test_appimage_installer.py -v
           /usr/bin/python3 -B tests/test_appimage_packaging.py -v
           /usr/bin/python3 -B tests/test_package_qualification.py -v
@@ -55,12 +55,18 @@ jobs:
           /usr/bin/python3 -B tests/test_physical_graphics_qualification.py -v
           /usr/bin/python3 -B tests/test_support_contract.py -v
           /usr/bin/python3 -B tests/test_qualification_evidence.py -v
+          /usr/bin/python3 -B tests/test_workflow_permissions.py -v
           python3 tools/check_support_manifest.py
           bash -n packaging/install-licasa-appimage.sh
           bash -n tools/check_appimage_install.sh
 
   verify_sanitizers:
     needs: preflight
+    # Nested reusable workflows must fit this caller's token permissions,
+    # including the Actions read permission declared by the skipped retry path.
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/ci.yml
     with:
       source_ref: ${{ github.sha }}
