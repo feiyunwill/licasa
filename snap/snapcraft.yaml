@@ -164,6 +164,13 @@ parts:
       test "$(dpkg-deb --field "$deb" Version)" = "${SNAPCRAFT_PROJECT_VERSION}-1"
       test "$(dpkg-deb --field "$deb" Architecture)" = amd64
       dpkg-deb -x "$deb" "$CRAFT_PART_INSTALL"
+      # Native transaction launchers/gates belong to dpkg, not snapd. Snap
+      # confinement and revision lifecycle wrap the actual viewer directly.
+      if [ -f "$CRAFT_PART_INSTALL/usr/bin/licasa.bin" ]; then
+        mv -f "$CRAFT_PART_INSTALL/usr/bin/licasa.bin" "$CRAFT_PART_INSTALL/usr/bin/licasa"
+        rm -f "$CRAFT_PART_INSTALL/usr/share/licasa/native-runtime.json" \
+          "$CRAFT_PART_INSTALL/usr/lib/licasa/native_lifecycle.py"
+      fi
       test -x "$CRAFT_PART_INSTALL/usr/bin/licasa"
       readelf -d "$CRAFT_PART_INSTALL/usr/bin/licasa" | grep -Fq 'libXext.so.6'
       install -d "$CRAFT_PART_INSTALL/usr/share/licasa"

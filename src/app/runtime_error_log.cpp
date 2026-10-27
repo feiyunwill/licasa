@@ -48,14 +48,15 @@ void printToStderr(QtMsgType type, const QMessageLogContext& context, const QStr
 #if defined(Q_OS_UNIX)
 int openPrivateFile(const QByteArray& encodedPath, off_t* size)
 {
-    const int flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW;
+    // A substituted FIFO must not block the GUI before fstat can reject it.
+    const int flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
     const int descriptor = ::open(encodedPath.constData(), flags, 0600);
     if (descriptor < 0) {
         return -1;
     }
     struct stat status {};
     if (::fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) ||
-        status.st_uid != ::geteuid() || ::fchmod(descriptor, 0600) != 0) {
+        status.st_uid != ::geteuid() || status.st_nlink != 1 || ::fchmod(descriptor, 0600) != 0) {
         ::close(descriptor);
         return -1;
     }

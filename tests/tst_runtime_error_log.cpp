@@ -1,13 +1,16 @@
 #include "app/runtime_error_log.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QTemporaryDir>
 #include <QtTest>
 
 #if defined(Q_OS_UNIX)
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 class RuntimeErrorLogTests final : public QObject {
@@ -18,6 +21,8 @@ class RuntimeErrorLogTests final : public QObject {
     void storesOnlyWarningsAndErrorsPrivately();
     void rotatesAtTheSizeLimit();
     void refusesSymlinkedLogFile();
+    void refusesHardlinkedLogFile();
+    void refusesFifoLogFileWithoutBlocking();
 };
 
 void RuntimeErrorLogTests::usesPerUserStateLocation()
@@ -133,5 +138,80 @@ void RuntimeErrorLogTests::refusesSymlinkedLogFile()
 #endif
 }
 
-QTEST_GUILESS_MAIN(RuntimeErrorLogTests)
+void RuntimeErrorLogTests::refusesHardlinkedLogFile()
+{
+#if defined(Q_OS_UNIX)
+    QTemporaryDir home;
+    QVERIFY(home.isValid());
+    const QString directory = home.filePath(QStringLiteral("state/licasa"));
+    QVERIFY(QDir().mkpath(directory));
+    QFile target(home.filePath(QStringLiteral("unrelated.txt")));
+    QVERIFY(target.open(QIODevice::WriteOnly));
+    QCOMPARE(target.write("untouched"), qint64(9));
+    target.close();
+    const QByteArray targetPath = QFile::encodeName(target.fileName());
+    const QString logPath = directory + QStringLiteral("/errors.log");
+    const QByteArray encodedLog = QFile::encodeName(logPath);
+    QCOMPARE(::chmod(targetPath.constData(), 0644), 0);
+    QCOMPARE(::link(targetPath.constData(), encodedLog.constData()), 0);
+
+    {
+        Licasa::RuntimeErrorLog log(logPath);
+        qWarning("Must not modify a hardlinked log target");
+    }
+    QVERIFY(target.open(QIODevice::ReadOnly));
+    QCOMPARE(target.readAll(), QByteArray("untouched"));
+    struct stat status {};
+    QCOMPARE(::stat(targetPath.constData(), &status), 0);
+    QCOMPARE(status.st_mode & 0777, mode_t(0644));
+#else
+    QSKIP("Hardlinked private log files are tested on Unix");
+#endif
+}
+
+void RuntimeErrorLogTests::refusesFifoLogFileWithoutBlocking()
+{
+#if defined(Q_OS_UNIX)
+    QTemporaryDir home;
+    QVERIFY(home.isValid());
+    const QString directory = home.filePath(QStringLiteral("state/licasa"));
+    QVERIFY(QDir().mkpath(directory));
+    const QString path = directory + QStringLiteral("/errors.log");
+    const QByteArray encoded = QFile::encodeName(path);
+    QCOMPARE(::mkfifo(encoded.constData(), 0600), 0);
+
+    // Use a child so a regression cannot hang the entire test runner.
+    QProcess writer;
+    writer.start(QCoreApplication::applicationFilePath(),
+                 {QStringLiteral("--probe-log-file"), path});
+    const bool finished = writer.waitForFinished(3000);
+    if (!finished) {
+        writer.kill();
+        writer.waitForFinished(1000);
+    }
+    QVERIFY2(finished, "Writing a warning blocked while opening a FIFO log target");
+    QCOMPARE(writer.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(writer.exitCode(), 0);
+    QVERIFY(writer.readAllStandardError().contains("Licasa could not write its error log."));
+    struct stat status {};
+    QCOMPARE(::lstat(encoded.constData(), &status), 0);
+    QVERIFY(S_ISFIFO(status.st_mode));
+#else
+    QSKIP("FIFO private log files are tested on Unix");
+#endif
+}
+
+int main(int argc, char* argv[])
+{
+    QCoreApplication application(argc, argv);
+    const QStringList arguments = application.arguments();
+    if (arguments.size() == 3 && arguments.at(1) == QStringLiteral("--probe-log-file")) {
+        Licasa::RuntimeErrorLog log(arguments.at(2));
+        qWarning("Warning for an invalid runtime log target");
+        return 0;
+    }
+    RuntimeErrorLogTests tests;
+    return QTest::qExec(&tests, argc, argv);
+}
+
 #include "tst_runtime_error_log.moc"

@@ -146,7 +146,9 @@ jobs:
           mkdir -p published
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir published \
             --pattern '*.deb' --pattern '*.AppImage' --pattern '*.rpm' \
-            --pattern '*.pkg.tar.zst' --pattern '*.snap'
+            --pattern '*.pkg.tar.zst' --pattern '*.snap' --pattern 'PKGBUILD*' \
+            --pattern 'native_lifecycle.py' --pattern 'licasa.install' --pattern 'licasa-lifecycle.hook'
+          (cd published && sha256sum --check PKGBUILD.sha256 && sha256sum --check PKGBUILD.sources.sha256)
           python3 tools/qualification_evidence.py check --source-sha "$SOURCE_SHA" \
             --build-run-id "$BUILD_RUN_ID" --version "$VERSION" --packages dist --evidence evidence \
             --published published --release-notes "packaging/release-notes/${RELEASE_TAG}.md"
@@ -164,6 +166,7 @@ jobs:
           (cd dist/rpm && sha256sum --check "licasa-appimage-${VERSION}-1.fc44.x86_64.rpm.sha256")
           (cd dist/arch && sha256sum --check "licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256")
           (cd dist/arch && sha256sum --check PKGBUILD.sha256)
+          (cd dist/arch && sha256sum --check PKGBUILD.sources.sha256)
           (cd dist/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
           source_commit="$(unsquashfs -cat "dist/snap/licasa_${VERSION}_amd64.snap" \
             usr/share/licasa/source-commit)"
@@ -284,7 +287,9 @@ jobs:
           mkdir -p published
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir published \
             --pattern '*.deb' --pattern '*.AppImage' --pattern '*.rpm' \
-            --pattern '*.pkg.tar.zst' --pattern '*.snap'
+            --pattern '*.pkg.tar.zst' --pattern '*.snap' --pattern 'PKGBUILD*' \
+            --pattern 'native_lifecycle.py' --pattern 'licasa.install' --pattern 'licasa-lifecycle.hook'
+          (cd published && sha256sum --check PKGBUILD.sha256 && sha256sum --check PKGBUILD.sources.sha256)
           python3 tools/qualification_evidence.py check --source-sha "$SOURCE_SHA" \
             --build-run-id "$BUILD_RUN_ID" --version "$VERSION" --packages dist --evidence evidence \
             --published published --release-notes "packaging/release-notes/${RELEASE_TAG}.md"
@@ -303,6 +308,7 @@ jobs:
           (cd dist/rpm && sha256sum --check "licasa-appimage-${VERSION}-1.fc44.x86_64.rpm.sha256")
           (cd dist/arch && sha256sum --check "licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256")
           (cd dist/arch && sha256sum --check PKGBUILD.sha256)
+          (cd dist/arch && sha256sum --check PKGBUILD.sources.sha256)
           (cd dist/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
       - name: Mark the checked GitHub prerelease as Latest
         env:
@@ -325,6 +331,7 @@ jobs:
             cat "dist/rpm/licasa-appimage-${VERSION}-1.fc44.x86_64.rpm.sha256"
             cat "dist/arch/licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256"
             cat "dist/arch/PKGBUILD.sha256"
+            cat "dist/arch/PKGBUILD.sources.sha256"
             cat "dist/snap/licasa_${VERSION}_amd64.snap.sha256"
             printf "\`\`\`\n"
             printf "\nPackage qualification: https://github.com/%s/actions/runs/%s.\n" "$GITHUB_REPOSITORY" "$QUALIFICATION_RUN_ID"

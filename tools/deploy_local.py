@@ -7,8 +7,12 @@ import argparse
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
+
+from lifecycle_update import (InstallationGate, LifecycleError, install_overlay,
+                              install_local_launcher, owned_processes)
 
 
 def run(command: list[str]) -> None:
@@ -16,58 +20,28 @@ def run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
-def local_processes(binary: Path) -> set[int]:
-    """Find this user's Local install, including a running deleted executable."""
-    result = set()
-    for process_dir in Path("/proc").iterdir():
-        if not process_dir.name.isdecimal():
-            continue
-        try:
-            if process_dir.stat().st_uid != os.geteuid():
-                continue
-            executable = os.readlink(process_dir / "exe").removesuffix(" (deleted)")
-            if executable == str(binary):
-                result.add(int(process_dir.name))
-        except (FileNotFoundError, PermissionError, ProcessLookupError):
-            # The process may have exited while /proc was being scanned.
-            continue
-    return result
+def desktop_exec_argument(path: Path) -> str:
+    value = str(path).replace("\\", "\\\\").replace('"', '\\"')
+    value = value.replace("$", "\\$").replace("`", "\\`").replace("%", "%%")
+    # Desktop string decoding precedes command parsing. Retain argument
+    # escapes through both steps, as in the AppImage installer.
+    return '"' + value.replace("\\", "\\\\") + '"'
 
 
-def wait_for_local_processes(binary: Path, present: bool, timeout: float) -> set[int]:
+def wait_for_local_processes(binary: Path, timeout: float) -> set[int]:
+    """Wait for the launched Local viewer, including a deleted executable."""
     deadline = time.monotonic() + timeout
     while True:
-        processes = local_processes(binary)
-        if bool(processes) == present or time.monotonic() >= deadline:
+        processes = set(owned_processes(binary))
+        if processes or time.monotonic() >= deadline:
             return processes
         time.sleep(0.1)
 
 
-def stop_running_local_copy(binary: Path) -> bool:
-    running = local_processes(binary)
-    if not running:
-        return False
-    if not binary.is_file():
-        raise SystemExit(f"Local Licasa is running, but its launcher is missing: {binary}")
-
-    print(f"Stopping running Local Licasa ({', '.join(map(str, sorted(running)))})", flush=True)
-    try:
-        run([str(binary), "--quit"])
-    except subprocess.CalledProcessError as error:
-        raise SystemExit(f"Could not ask Local Licasa to quit: {error}") from error
-
-    still_running = wait_for_local_processes(binary, present=False, timeout=30)
-    if still_running:
-        raise SystemExit(
-            "Local Licasa did not quit, so the install was stopped before replacing its files. "
-            f"Still running: {', '.join(map(str, sorted(still_running)))}"
-        )
-    return True
-
-
-def launch_local_copy(binary: Path, background: bool) -> None:
-    command = [str(binary)] + (["--background"] if background else [])
-    print(f"Launching {binary}" + (" in the background" if background else ""), flush=True)
+def launch_local_copy(binary: Path) -> None:
+    launcher = binary.with_name("licasa-launch")
+    command = [str(launcher if launcher.is_file() else binary)]
+    print(f"Launching {binary}", flush=True)
     process = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
@@ -75,7 +49,7 @@ def launch_local_copy(binary: Path, background: bool) -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    running = wait_for_local_processes(binary, present=True, timeout=10)
+    running = wait_for_local_processes(binary, timeout=10)
     if process.poll() is not None or process.pid not in running:
         raise SystemExit("Local Licasa did not start after installation.")
 
@@ -109,40 +83,46 @@ def main() -> None:
         )
 
     binary = prefix / "bin" / "licasa"
-    was_running = stop_running_local_copy(binary)
-
-    prefix.mkdir(parents=True, exist_ok=True)
-    run(["cmake", "--install", str(build_dir), "--prefix", str(prefix)])
-
-    if not binary.is_file():
-        raise SystemExit(f"Install completed but the Licasa binary is missing: {binary}")
-
-    desktop_dir = prefix / "share" / "applications"
-    desktop_file = desktop_dir / "licasa.desktop"
-    if desktop_file.is_file():
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    # Build the entire candidate before asking the running installation to
+    # stop. DESTDIR keeps this operation away from the active viewer.
+    with tempfile.TemporaryDirectory(prefix=".licasa-local-stage.", dir=prefix.parent) as temporary:
+        staging = Path(temporary)
+        subprocess.run(["cmake", "--install", str(build_dir), "--prefix", str(prefix)],
+                       env=dict(os.environ, DESTDIR=str(staging)), check=True)
+        staged_prefix = staging / str(prefix).lstrip("/")
+        if not (staged_prefix / "bin/licasa").is_file():
+            raise SystemExit("The staged Local runtime has no viewer executable; installation was not changed.")
+        install_local_launcher(staged_prefix)
+        desktop_file = staged_prefix / "share/applications/licasa.desktop"
         # A Snap install adds a second Licasa launcher. Make the development
         # build explicit and pin it to this prefix so the two are distinguishable.
-        entries = desktop_file.read_text(encoding="utf-8").splitlines()
-        replacements = {
-            "Name": "Licasa (Local)",
-            "TryExec": str(binary),
-            "Exec": f'"{binary}" %f',
-        }
-        updated = []
-        for entry in entries:
-            key = entry.partition("=")[0]
-            updated.append(f"{key}={replacements[key]}" if key in replacements else entry)
-        desktop_file.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        if desktop_file.is_file():
+            entries = desktop_file.read_text(encoding="utf-8").splitlines()
+            launcher = prefix / "bin/licasa-launch"
+            replacements = {"Name": "Licasa (Local)", "TryExec": str(launcher),
+                            "Exec": f'bash {desktop_exec_argument(launcher)} %f'}
+            updated = []
+            for entry in entries:
+                key = entry.partition("=")[0]
+                updated.append(f"{key}={replacements[key]}" if key in replacements else entry)
+            desktop_file.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        try:
+            with InstallationGate(prefix) as gate:
+                install_overlay(gate, staged_prefix, binary)
+        except LifecycleError as error:
+            raise SystemExit(str(error)) from error
 
+    desktop_dir = prefix / "share/applications"
     update_desktop_database = shutil.which("update-desktop-database")
     if update_desktop_database and desktop_dir.is_dir():
         run([update_desktop_database, str(desktop_dir)])
 
     print(f"\nLicasa deployed locally: {binary}")
-    if args.launch or was_running:
-        config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-        background_entry = config_home / "autostart/licasa-background.desktop"
-        launch_local_copy(binary, background=not args.launch and background_entry.is_file())
+    if args.launch:
+        launch_local_copy(binary)
+    else:
+        print("Background startup is deferred to the next desktop login.")
 
 
 if __name__ == "__main__":

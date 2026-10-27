@@ -1,0 +1,12 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = licasa-appimage
+
+[Action]
+Description = Safely stopping this native Licasa installation before replacement
+When = PreTransaction
+Exec = /opt/licasa/usr/libexec/licasa/native_lifecycle.py --installation appimage-native prepare --action transaction
+AbortOnFail

@@ -25,12 +25,17 @@ class BackgroundModeManager final : public QObject {
 
   private:
     static QString quoteDesktopExecArgument(QString argument);
-
+    QString preferenceKey() const;
+    QString autostartCommand() const;
+    bool matchesAutostartCommand(const QByteArray& command) const;
+    QString legacyAutostartEntryPath() const;
+    bool ownsAutostart(const QByteArray& content) const;
     QString autostartEntryPath() const;
-    QString executablePath() const;
     void reportError(const QString& message);
     bool writeAutostart();
     bool removeAutostart(const QString& path, bool includeCurrent);
+
+    QSettings backgroundSettings_;
 };
 
 class ViewerPreferences final : public QObject {

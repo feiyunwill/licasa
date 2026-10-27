@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 
+from native_lifecycle import stage_payload
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -36,6 +38,9 @@ def main() -> None:
             if not required.is_file():
                 raise RuntimeError(f"AppImage is missing {required.relative_to(extracted)}")
         shutil.copytree(extracted, destination / "opt/licasa", symlinks=True)
+        original = destination / "opt/licasa/AppRun.lifecycle-original"
+        if not original.exists():
+            shutil.copy2(destination / "opt/licasa/AppRun", original)
         binary = destination / "usr/bin/licasa"
         binary.parent.mkdir(parents=True)
         binary.write_text('#!/bin/sh\nexec /opt/licasa/AppRun "$@"\n')
@@ -52,6 +57,7 @@ def main() -> None:
         system_license = destination / "usr/share/licenses/licasa-appimage/LICENSE"
         system_license.parent.mkdir(parents=True)
         shutil.copy2(license_file, system_license)
+        stage_payload(destination, "appimage-native")
 
 
 if __name__ == "__main__":

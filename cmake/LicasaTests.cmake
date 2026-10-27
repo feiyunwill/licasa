@@ -41,11 +41,39 @@ add_test(NAME licasa_graphics_backend_tests COMMAND licasa_graphics_backend_test
 set_tests_properties(licasa_graphics_backend_tests PROPERTIES
         TIMEOUT 15 LABELS "core;startup;graphics;fast")
 
+add_test(NAME licasa_native_lifecycle_tests
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_lifecycle.py")
+set_tests_properties(licasa_native_lifecycle_tests PROPERTIES TIMEOUT 30 LABELS "lifecycle;packaging;security;fast")
+
+add_executable(licasa_lifecycle_platform_tests tests/tst_lifecycle_platform.cpp)
+target_include_directories(licasa_lifecycle_platform_tests PRIVATE src)
+target_link_libraries(licasa_lifecycle_platform_tests PRIVATE licasa_lifecycle_platform Qt6::Test)
+licasa_enable_warnings(licasa_lifecycle_platform_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_lifecycle_platform_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_lifecycle_platform_tests)
+add_test(NAME licasa_lifecycle_platform_tests COMMAND licasa_lifecycle_platform_tests)
+set_tests_properties(licasa_lifecycle_platform_tests PROPERTIES TIMEOUT 15 LABELS "core;lifecycle;security;fast")
+
+add_executable(licasa_application_lifecycle_tests tests/tst_application_lifecycle.cpp)
+target_include_directories(licasa_application_lifecycle_tests PRIVATE src)
+target_link_libraries(licasa_application_lifecycle_tests PRIVATE Qt6::Core Qt6::Test)
+licasa_enable_warnings(licasa_application_lifecycle_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_application_lifecycle_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_application_lifecycle_tests)
+add_test(NAME licasa_application_lifecycle_tests COMMAND licasa_application_lifecycle_tests)
+set_tests_properties(licasa_application_lifecycle_tests PROPERTIES TIMEOUT 15 LABELS "core;lifecycle;fast")
+add_test(NAME licasa_lifecycle_protocol_tests
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lifecycle_protocol.py")
+set_tests_properties(licasa_lifecycle_protocol_tests PROPERTIES TIMEOUT 30 LABELS "lifecycle;fast")
+add_test(NAME licasa_lifecycle_update_tests
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lifecycle_update.py")
+set_tests_properties(licasa_lifecycle_update_tests PROPERTIES TIMEOUT 60 LABELS "lifecycle;packaging")
+
 add_executable(licasa_background_mode_tests
         tests/tst_background_mode.cpp
         src/app/application_settings.cpp)
 target_include_directories(licasa_background_mode_tests PRIVATE src)
-target_link_libraries(licasa_background_mode_tests PRIVATE Qt6::Core Qt6::Test)
+target_link_libraries(licasa_background_mode_tests PRIVATE Qt6::Core Qt6::Test licasa_lifecycle_platform)
 licasa_enable_warnings(licasa_background_mode_tests)
 list(APPEND LICASA_TEST_TARGETS licasa_background_mode_tests)
 list(APPEND LICASA_CORE_TEST_TARGETS licasa_background_mode_tests)
@@ -540,6 +568,17 @@ add_test(NAME licasa_async_image_provider_tests
 set_tests_properties(licasa_async_image_provider_tests PROPERTIES
         TIMEOUT 15 LABELS "core;async;lifecycle;fast")
 
+add_executable(licasa_fast_pnm_preview_tests tests/tst_fast_pnm_preview.cpp
+        src/imaging/fast_pnm_preview.cpp src/imaging/fast_pnm_preview.h)
+target_include_directories(licasa_fast_pnm_preview_tests PRIVATE src)
+target_link_libraries(licasa_fast_pnm_preview_tests PRIVATE Qt6::Gui Qt6::Test)
+licasa_enable_warnings(licasa_fast_pnm_preview_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_fast_pnm_preview_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_fast_pnm_preview_tests)
+add_test(NAME licasa_fast_pnm_preview_tests COMMAND licasa_fast_pnm_preview_tests)
+set_tests_properties(licasa_fast_pnm_preview_tests PROPERTIES
+        TIMEOUT 30 LABELS "core;codec;preview;security")
+
 add_executable(licasa_image_edit_pipeline_tests tests/tst_image_edit_pipeline.cpp)
 if(LICASA_HAVE_FAST_TIFF_PREVIEW)
     add_executable(licasa_preview_runtime_tests tests/tst_preview_runtime.cpp)
@@ -685,6 +724,26 @@ foreach(value IN ITEMS 0 1 2147483647 -1 invalid 9999999999999999999999)
 endforeach()
 set_tests_properties(licasa_image_save_tests PROPERTIES
         TIMEOUT 60 LABELS "core;policy;fast")
+
+# Compile the production observers into the test even when the standalone
+# diagnostics executable is disabled, including sanitizer-only test builds.
+add_executable(licasa_diagnostic_driver_tests
+        tests/tst_diagnostic_drivers.cpp
+        tools/diagnostics_common.cpp
+        tools/diagnostics_raw_behavior.cpp
+        tools/diagnostics_viewer_measurement.cpp)
+target_include_directories(licasa_diagnostic_driver_tests PRIVATE src tools)
+target_link_libraries(licasa_diagnostic_driver_tests PRIVATE
+        licasa_image_services Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
+licasa_enable_warnings(licasa_diagnostic_driver_tests)
+list(APPEND LICASA_TEST_TARGETS licasa_diagnostic_driver_tests)
+list(APPEND LICASA_CORE_TEST_TARGETS licasa_diagnostic_driver_tests)
+add_test(NAME licasa_diagnostic_driver_tests
+        COMMAND licasa_diagnostic_driver_tests -platform offscreen)
+set_tests_properties(licasa_diagnostic_driver_tests PROPERTIES
+        TIMEOUT 45 LABELS "core;diagnostics;fast"
+        ENVIRONMENT "QT_QUICK_BACKEND=software")
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     foreach(runtime_contract_test IN ITEMS runtime_profiles qt_runtime)
@@ -797,6 +856,9 @@ if(LICASA_ENABLE_MOTION_PLAYBACK)
 endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/LicasaTemporalTests.cmake)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(${CMAKE_CURRENT_LIST_DIR}/LicasaComputeFailureTests.cmake)
+endif()
 
 # CLion exposes custom CMake targets directly in the target selector. These
 # targets turn the existing CTest suite into a repeatable local bench: one

@@ -147,6 +147,22 @@ class OpenClEditDevice final : public EditComputeDevice {
         cl_mem transientOutput = nullptr;
         cl_mem input = nullptr;
         cl_mem output = nullptr;
+        bool succeeded = false;
+        const auto release = qScopeGuard([&] {
+            // Uploads borrow source pixels and uniforms until the queue drains.
+            // Fence on every return, including a later upload failing before
+            // kernel setup, before host data or request buffers can disappear.
+            const bool drained = clFinish(queue) == CL_SUCCESS;
+            if (!succeeded || !drained) {
+                invalidateResidentBase();
+            }
+            if (transientInput) {
+                clReleaseMemObject(transientInput);
+            }
+            if (transientOutput) {
+                clReleaseMemObject(transientOutput);
+            }
+        });
         const bool reusable = bytes <= maximumReusableRasterBytes;
         const bool singleStage = color != sharpen;
         const bool allowResidentBase =
@@ -161,19 +177,17 @@ class OpenClEditDevice final : public EditComputeDevice {
             const bool residentHit = allowResidentBase &&
                                      residentSourceIdentity == sourceIdentity &&
                                      residentSourceBytes == bytes;
+            if (!residentHit) {
+                // A replacement upload can alter the old retained base even
+                // when a later driver call fails. Never reuse its old receipt.
+                invalidateResidentBase();
+            }
             if ((!residentHit &&
                  clEnqueueWriteBuffer(queue, input, CL_FALSE, 0, bytes, source.constBits(), 0,
                                       nullptr, nullptr) != CL_SUCCESS) ||
                 clEnqueueWriteBuffer(queue, parameterBuffer, CL_FALSE, 0, sizeof(values),
                                      values.data(), 0, nullptr, nullptr) != CL_SUCCESS) {
                 return false;
-            }
-            if (allowResidentBase && !residentHit) {
-                residentSourceIdentity = sourceIdentity;
-                residentSourceBytes = bytes;
-            }
-            if (color && sharpen) {
-                invalidateResidentBase();
             }
         } else {
             transientInput = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
@@ -184,27 +198,9 @@ class OpenClEditDevice final : public EditComputeDevice {
             if (!input || !output ||
                 clEnqueueWriteBuffer(queue, parameterBuffer, CL_FALSE, 0, sizeof(values),
                                      values.data(), 0, nullptr, nullptr) != CL_SUCCESS) {
-                if (transientInput) {
-                    clReleaseMemObject(transientInput);
-                }
-                if (transientOutput) {
-                    clReleaseMemObject(transientOutput);
-                }
                 return false;
             }
         }
-
-        const auto release = qScopeGuard([&] {
-            // Do not release request-scoped buffers while queued kernels still
-            // reference them. Retained buffers stay valid for the next edit.
-            clFinish(queue);
-            if (transientInput) {
-                clReleaseMemObject(transientInput);
-            }
-            if (transientOutput) {
-                clReleaseMemObject(transientOutput);
-            }
-        });
 
         const int width = source.width();
         const int height = source.height();
@@ -240,8 +236,15 @@ class OpenClEditDevice final : public EditComputeDevice {
             (cancelled && cancelled->load(std::memory_order_relaxed))) {
             return false;
         }
-        return clEnqueueReadBuffer(queue, input, CL_TRUE, 0, bytes, destination.bits(), 0, nullptr,
-                                   nullptr) == CL_SUCCESS;
+        succeeded = clEnqueueReadBuffer(queue, input, CL_TRUE, 0, bytes, destination.bits(), 0,
+                                        nullptr, nullptr) == CL_SUCCESS;
+        if (succeeded && allowResidentBase) {
+            // Enqueue acceptance alone does not confirm an asynchronous upload.
+            // Publish residency only after its fence and readback succeed.
+            residentSourceIdentity = sourceIdentity;
+            residentSourceBytes = bytes;
+        }
+        return succeeded;
     }
 
     void releaseImageBuffers() override

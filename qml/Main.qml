@@ -46,29 +46,25 @@ Window {
     color: "transparent"
     onFrameSwapped: {
         windowedZoom.exactFrameSwapped()
-        if (imageViewport.activeRequestKey.indexOf("licasa_parallel=preview") >= 0
-                && imageViewport.parallelPairId !== lastPresentedParallelPairId) {
-            lastPresentedParallelPairId = imageViewport.parallelPairId
+        const presentedPairId = imageViewport.activeParallelPairId
+        if (presentedPairId.length > 0
+                && presentedPairId !== lastPresentedParallelPairId) {
+            lastPresentedParallelPairId = presentedPairId
             windowManager.markParallelPreviewPresented(lastPresentedParallelPairId)
+        }
+        if (nearbyPreviewsAwaitingFrame && nearbyPreviewsReadyForFrame
+                && imageViewport.imageStatus === Image.Ready
+                && displayedFileName === currentFileName) {
+            nearbyPreviewsAwaitingFrame = false
+            nearbyPreviewsReadyForFrame = false
+            if (nearbyPreviewsRefreshPending) {
+                nearbyPreviewsRefreshPending = false
+                nearbyPreviewTimer.restart()
+            }
         }
         if (browseAwaitingFrame && browseImageReadyForFrame
                 && displayedFileName === currentFileName) {
-            browseAwaitingFrame = false
-            browseImageReadyForFrame = false
-            const direction = browsePendingDirection
-            browsePendingDirection = 0
-            if (direction !== 0) {
-                const generation = browseInputGeneration
-                browseScheduledDirection = direction
-                Qt.callLater(function() {
-                    if (root.browseInputGeneration === generation
-                            && root.browseScheduledDirection === direction) {
-                        root.browseScheduledDirection = 0
-                        root.browseImage(direction)
-                    }
-                })
-            }
-            else if (!browseBurstActive && (previewPhase || rawFastPhase)
+            if (!finishBrowseStep() && !browseBurstActive && (previewPhase || rawFastPhase)
                     && !imageLimitedToPreview && fullResolutionRenderingEnabled)
                 fullResTimer.restart()
         }
@@ -81,6 +77,22 @@ Window {
     }
 
     readonly property bool persistentShell: windowSession.persistentShell
+    readonly property string lifecycleBusyReason: {
+        if (imageSaveService.busy)
+            return "saving"
+        if ((motionPhotoExportService && motionPhotoExportService.busy)
+                || (animationExportService && animationExportService.busy))
+            return "exporting"
+        if (fileDialogVisible)
+            return "modal-dialog"
+        if (editorCropMode)
+            return "crop-draft"
+        if (editorHasAdjustments)
+            return "unsaved-edits"
+        if (pendingImageReveal)
+            return "opening-image"
+        return ""
+    }
 
     property bool pendingImageReveal: false
     property bool pendingNavigationFit: false
@@ -103,6 +115,9 @@ Window {
     property int browsePendingDirection: 0
     property int browseScheduledDirection: 0
     property int browseInputGeneration: 0
+    property bool nearbyPreviewsAwaitingFrame: false
+    property bool nearbyPreviewsReadyForFrame: false
+    property bool nearbyPreviewsRefreshPending: false
     Connections {
         target: root.windowManager
         function onNavigationKeyReleased(window, direction) {
@@ -114,6 +129,12 @@ Window {
                 root.browseScheduledDirection = 0
                 root.browseInputGeneration += 1
             }
+        }
+        function onQuitBlocked(reason) {
+            const message = reason === "unsaved-edits" || reason === "crop-draft"
+                ? "Save your changes, or export them and close the picture, then quit again."
+                : "Finish the current save, export or file dialog, then quit again."
+            notificationCenter.finish("quit", "error", "Licasa is still in use", message)
         }
     }
     property string currentFileName: ""
@@ -138,6 +159,12 @@ Window {
         && !editPanelOpen
         && !editorHasAdjustments
         && !imageSaveService.busy
+    // An active motion session can own the processing gate while a queued
+    // still promotion waits. Pause and Seek must remain usable in that case.
+    readonly property bool playbackInteractionEnabled: !imageSaveService.busy
+        && (!motionPhotoExportService || !motionPhotoExportService.busy)
+        && (!animationExportService || !animationExportService.busy)
+        && (!imageViewport.decodePending || (motionPhotoSession && motionPhotoSession.active))
     readonly property bool smoothImageScalingEnabled:
         viewerPreferences.smoothImageScalingEnabled
     readonly property bool mipmapImageScalingEnabled:
@@ -608,6 +635,8 @@ Window {
     }
 
     function parallelOpeningWorthwhile() {
+        if (FileUrls.previewFirstFullResolution(residentImageUrl))
+            return false
         const name = FileUrls.fileName(residentImageUrl).toLowerCase()
         const dot = name.lastIndexOf(".")
         const extension = dot >= 0 ? name.substring(dot + 1) : ""
@@ -623,8 +652,6 @@ Window {
             return rawEmbeddedPreviewSize.width >= previewSourceWidth()
                 && rawEmbeddedPreviewSize.height >= previewSourceHeight()
         if (extension === "tif" || extension === "tiff")
-            return false
-        if (extension === "png" && reusablePngBase)
             return false
         return true
     }
@@ -1194,6 +1221,10 @@ Window {
     }
 
     function clearImageState() {
+        nearbyPreviewTimer.stop()
+        nearbyPreviewsAwaitingFrame = false
+        nearbyPreviewsReadyForFrame = false
+        nearbyPreviewsRefreshPending = false
         browseAwaitingFrame = false
         browseImageReadyForFrame = false
         browsePendingDirection = 0
@@ -1426,6 +1457,9 @@ Window {
         // Scan the containing folder while the image decoder is working.
         // The nearby-preview request waits for this index instead of scanning
         // a large folder on the UI thread after the first frame appears.
+        nearbyPreviewsAwaitingFrame = true
+        nearbyPreviewsReadyForFrame = false
+        nearbyPreviewsRefreshPending = false
         formatSupport.prepareDirectoryIndex(u)
 
         const previousImageReady = imageViewport.imageStatus === Image.Ready
@@ -1514,6 +1548,26 @@ Window {
         refreshEditedPreviewSource()
     }
 
+    function finishBrowseStep() {
+        browseAwaitingFrame = false
+        browseImageReadyForFrame = false
+        const direction = browsePendingDirection
+        browsePendingDirection = 0
+        if (direction === 0)
+            return false
+
+        const generation = browseInputGeneration
+        browseScheduledDirection = direction
+        Qt.callLater(function() {
+            if (root.browseInputGeneration === generation
+                    && root.browseScheduledDirection === direction) {
+                root.browseScheduledDirection = 0
+                root.browseImage(direction)
+            }
+        })
+        return true
+    }
+
     function browseImage(direction) {
         if (browseScheduledDirection !== 0) {
             browseScheduledDirection = 0
@@ -1551,6 +1605,12 @@ Window {
                 || !FileUrls.isLocal(root.residentImageUrl)) {
             windowManager.prepareNearbyPreviews([], Qt.size(0, 0),
                 root.viewerPreferences.maximumImageMemoryMiB)
+            return
+        }
+        if (root.nearbyPreviewsAwaitingFrame) {
+            // Keep already prepared browse entries; only new speculative work
+            // waits until the selected raster has actually been presented.
+            root.nearbyPreviewsRefreshPending = true
             return
         }
         const name = FileUrls.fileName(root.residentImageUrl).toLowerCase()
@@ -1931,6 +1991,17 @@ Window {
 
     function quitApp() {
         windowManager.quitApplication()
+    }
+
+    function stopOptionalWorkForLifecycle() {
+        nearbyPreviewTimer.stop()
+        fullResTimer.stop()
+        browseIdleTimer.stop()
+        rawMetadataProbeTimer.stop()
+        editorPreviewTimer.stop()
+        cropSizeEstimateTimer.stop()
+        photoAssetProbe.cancel()
+        stopMotionPhotoPlaybackForLifecycle()
     }
 
     EditorSession {
@@ -2665,6 +2736,10 @@ Window {
             && !root.currentImageAnimated
             && root.fullResolutionRenderingEnabled
             && root.parallelOpeningWorthwhile()
+        previewFirstPreloadEnabled: !root.browseBurstActive && !root.browseAwaitingFrame
+            && !root.imageLimitedToPreview && !root.currentImageAnimated
+            && root.fullResolutionRenderingEnabled
+            && FileUrls.previewFirstFullResolution(root.residentImageUrl)
         previewSourceWidth: root.browseAwaitingFrame || root.browseBurstActive
             ? root.burstPreviewSize().width : root.previewSourceWidth()
         previewSourceHeight: root.browseAwaitingFrame || root.browseBurstActive
@@ -2677,11 +2752,7 @@ Window {
         floatingPlaybackEnabled: !root.currentImageAnimated
             && root.motionPhotoSession !== null && root.motionPhotoSession.available
             && !root.editPanelOpen && !root.editorHasAdjustments
-        playbackInteractionEnabled: !root.imageSaveService.busy
-            && (!root.motionPhotoExportService || !root.motionPhotoExportService.busy)
-            && (!root.animationExportService || !root.animationExportService.busy)
-            && (!imageViewport.decodePending
-                || (root.motionPhotoSession && root.motionPhotoSession.active))
+        playbackInteractionEnabled: root.playbackInteractionEnabled
         onPlaybackToggleRequested: {
             if (root.motionPhotoSession)
                 root.motionPhotoSession.togglePlayback()
@@ -2778,23 +2849,8 @@ Window {
                 root.promoteFullRes()
                 return
             }
-            if (root.browseAwaitingFrame) {
-                root.browseAwaitingFrame = false
-                root.browseImageReadyForFrame = false
-                const direction = root.browsePendingDirection
-                root.browsePendingDirection = 0
-                if (direction !== 0) {
-                    const generation = root.browseInputGeneration
-                    root.browseScheduledDirection = direction
-                    Qt.callLater(function() {
-                        if (root.browseInputGeneration === generation
-                                && root.browseScheduledDirection === direction) {
-                            root.browseScheduledDirection = 0
-                            root.browseImage(direction)
-                        }
-                    })
-                }
-            }
+            if (root.browseAwaitingFrame)
+                root.finishBrowseStep()
             root.pendingNavigationFit = false
             const previewAvailable = root.hasImage()
             const openingImage = root.imageOpenStartedMs >= 0
@@ -2834,6 +2890,8 @@ Window {
         }
 
         onImageReady: {
+            if (root.nearbyPreviewsAwaitingFrame)
+                root.nearbyPreviewsReadyForFrame = true
             root.decodedFullBaseReady = root.previewPhase
                 && root.windowManager.hasDecodedFullBase(root.residentImageUrl)
             if (root.browseAwaitingFrame)
@@ -3006,20 +3064,7 @@ Window {
                 windowManager: root.windowManager,
                 viewerRoot: root,
                 interactionEnabled: Qt.binding(function() {
-                    // decodePending is an admission gate before Motion Photo
-                    // playback starts. Once the session is active it owns the
-                    // shared heavy-processing gate, so a queued still-image
-                    // promotion may remain pending until playback stops. Do
-                    // not let that waiter disable Pause/Seek on the transport
-                    // that currently owns the gate.
-                    const motionOwnsProcessingGate = root.motionPhotoSession
-                        && root.motionPhotoSession.active
-                    return !root.imageSaveService.busy
-                        && (!root.motionPhotoExportService
-                            || !root.motionPhotoExportService.busy)
-                        && (!root.animationExportService
-                            || !root.animationExportService.busy)
-                        && (!imageViewport.decodePending || motionOwnsProcessingGate)
+                    return root.playbackInteractionEnabled
                 })
             })
         }
@@ -3148,6 +3193,8 @@ Window {
         backgroundModeManager: root.backgroundModeManager
         appVersion: root.appInfo.version
         releaseDate: root.appInfo.releaseDate
+        installedAsSnap: root.appInfo.installedAsSnap === true
+        onQuitRequested: root.quitApp()
         onPanelOpenChanged: {
             if (panelOpen)
                 notificationCenter.historyOpen = false

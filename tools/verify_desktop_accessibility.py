@@ -262,16 +262,36 @@ def main() -> int:
         snapshot("failure")
         return 1
     finally:
-        if app is not None:
-            mappings = Path(f"/proc/{app.pid}/maps")
-            if mappings.exists():
-                report["process"] = {"mapped_qt_libraries": sorted({line.split(maxsplit=5)[5].strip()
-                    for line in mappings.read_text().splitlines() if "libQt6" in line and len(line.split(maxsplit=5)) == 6})}
-            subprocess.run([str(args.app.absolute()), "--quit"], stdout=log, stderr=subprocess.STDOUT, timeout=8)
-            try: app.wait(timeout=4)
-            except subprocess.TimeoutExpired: app.terminate(); app.wait(timeout=4)
         report["atspi_snapshots"] = snapshots
         report["application_log"] = str(args.output.with_suffix(".application.log"))
+        args.output.write_text(json.dumps(report, indent=2) + "\n")
+        if app is not None:
+            mappings = Path(f"/proc/{app.pid}/maps")
+            try:
+                report["process"] = {"mapped_qt_libraries": sorted({line.split(maxsplit=5)[5].strip()
+                    for line in mappings.read_text().splitlines() if "libQt6" in line and len(line.split(maxsplit=5)) == 6})}
+            except OSError as error:
+                report["process_inspection_error"] = str(error)
+        # These accessibility scenarios intentionally leave crop/edit drafts.
+        # Persist their outcome before cleanup: safe Quit must preserve them.
+        args.output.write_text(json.dumps(report, indent=2) + "\n")
+        if app is not None and app.poll() is None:
+            report["cleanup"] = {"qualifies_graceful_shutdown": False}
+            try:
+                quit_result = subprocess.run([str(args.app.absolute()), "--quit"], stdout=log,
+                                             stderr=subprocess.STDOUT, timeout=12)
+                report["cleanup"]["quit_exit_code"] = quit_result.returncode
+                try:
+                    app.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    if os.environ.get("LICASA_VIRTUAL_DESKTOP") == "1":
+                        app.kill()  # Only this owned disposable fixture, after outcome capture.
+                        app.wait(timeout=4)
+                        report["cleanup"]["forced_owned_virtual_fixture"] = True
+                    else:
+                        report["cleanup"]["deferred_to_preserve_drafts"] = True
+            except (OSError, subprocess.SubprocessError) as error:
+                report["cleanup"]["error"] = str(error)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         log.close()
         print(json.dumps({key: value for key, value in report.items() if key != "atspi_snapshots"}))

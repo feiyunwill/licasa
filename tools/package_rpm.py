@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import subprocess
 
+from native_lifecycle import embedded_script
+
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "licasa-rpm-builder:fedora44"
@@ -27,18 +29,33 @@ def main() -> None:
     version = match.group(1)
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    spec = (ROOT / "packaging/licasa-appimage.spec").read_text()
+    operations = {"@NATIVE_PRETRANS@": ("prepare", "upgrade"),
+                  "@NATIVE_COMPLETE@": ("complete", "upgrade"),
+                  "@NATIVE_PREREMOVE@": ("prepare", "remove"),
+                  "@NATIVE_REMOVED@": ("removed", "remove")}
+    for marker, (operation, action) in operations.items():
+        content = embedded_script("appimage-native", operation, action)
+        if action == "remove":
+            content = content.replace("set -eu\n", 'set -eu\n[ "${1:-0}" -eq 0 ] || exit 0\n', 1)
+        # RPM expands percent macros while parsing scriptlets.
+        spec = spec.replace(marker, content.removeprefix("#!/bin/sh\n").replace("%", "%%"))
+    rendered_spec = output / "licasa-appimage.spec"
+    rendered_spec.write_text(spec)
     subprocess.run(["docker", "build", "--file", str(ROOT / "packaging/build-rpm.Dockerfile"),
                     "--tag", IMAGE, str(ROOT / "packaging")], check=True)
     script = (
         "mkdir -p /tmp/rpmbuild/SOURCES /tmp/rpmbuild/RPMS; "
         "cp /input/AppImage /tmp/rpmbuild/SOURCES/Licasa-$1-x86_64.AppImage; "
         "cp /source/tools/stage_portable_package.py /tmp/rpmbuild/SOURCES/; "
+        "cp /source/tools/native_lifecycle.py /tmp/rpmbuild/SOURCES/; "
         "rpmbuild -bb --define '_topdir /tmp/rpmbuild' "
-        "--define \"licasa_version $1\" /source/packaging/licasa-appimage.spec; "
+        "--define \"licasa_version $1\" /input/licasa-appimage.spec; "
         "cp /tmp/rpmbuild/RPMS/x86_64/*.rpm /output/"
     )
     subprocess.run(["docker", "run", "--rm", "--network", "none",
                     "-v", f"{ROOT}:/source:ro", "-v", f"{appimage}:/input/AppImage:ro",
+                    "-v", f"{rendered_spec}:/input/licasa-appimage.spec:ro",
                     "-v", f"{output}:/output", IMAGE, "sh", "-ec", script, "_", version],
                    check=True)
     packages = list(output.glob(f"licasa-appimage-{version}-1.*.x86_64.rpm"))

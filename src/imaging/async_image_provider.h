@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QHash>
 #include <QMutex>
 #include <QQuickAsyncImageProvider>
 #include <QThreadPool>
@@ -14,7 +13,7 @@ namespace Licasa {
 
 class ImageResourcePolicy;
 struct DecodedImageCache;
-struct ParallelDecodePair;
+class ParallelDecodePairRegistry;
 struct NearbyPreviewCache;
 
 class AsyncImageProvider final : public QQuickAsyncImageProvider {
@@ -49,8 +48,7 @@ class AsyncImageProvider final : public QQuickAsyncImageProvider {
     ImageResourcePolicy& resourcePolicy_;
     std::shared_ptr<DecodedImageCache> decodedImageCache_;
     std::shared_ptr<NearbyPreviewCache> nearbyPreviewCache_;
-    QMutex pairsMutex_;
-    QHash<QString, std::shared_ptr<ParallelDecodePair>> pendingPairs_;
+    std::unique_ptr<ParallelDecodePairRegistry> pendingPairs_;
     QMutex requestsMutex_;
     std::vector<std::weak_ptr<std::atomic_bool>> activeRequests_;
     bool nextNavigationPreview_ = false;

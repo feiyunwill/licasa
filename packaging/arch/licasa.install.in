@@ -1,0 +1,37 @@
+# Incoming scriptlets cannot abort an ALPM transaction. On the first upgrade
+# from a package without our installed hook, fully Quit Licasa before pacman.
+# Later transactions are enforced by the installed AbortOnFail pre-hook.
+_licasa_native() {
+    if [ ! -x /usr/bin/python3 ]; then
+        echo 'Licasa lifecycle needs python before replacement. Fully Quit Licasa and install the prerequisite first.' >&2
+        return 1
+    fi
+    /usr/bin/python3 -I - --installation appimage-native "$1" --action "${2:-upgrade}" <<'LICASA_NATIVE_PYTHON'
+@NATIVE_HELPER_SOURCE@
+LICASA_NATIVE_PYTHON
+}
+
+pre_install() {
+    _licasa_native prepare install
+}
+pre_upgrade() {
+    _licasa_native prepare upgrade || {
+        echo 'First legacy upgrade requires full Quit BEFORE pacman. This incoming scriptlet cannot enforce that prerequisite.' >&2
+        return 1
+    }
+}
+pre_remove() {
+    _licasa_native prepare remove
+}
+post_install() {
+    _licasa_native complete install || {
+        echo 'Licasa lifecycle verification failed. Fully Quit the old copy, then repair/reinstall through pacman; startup remains blocked.' >&2
+        return 1
+    }
+}
+post_upgrade() {
+    post_install
+}
+post_remove() {
+    _licasa_native removed remove
+}

@@ -55,7 +55,11 @@ def main() -> None:
         (work / "Dockerfile").write_text(
             f"FROM {'debian:trixie-slim' if args.target == 'debian-13' else 'ubuntu:24.04'}\n"
             "COPY licasa.deb /tmp/licasa.deb\n"
-            "RUN apt-get update && apt-get install -y --no-install-recommends "
+            # Docker build roots lack SYS_PTRACE. Keep APT's download worker in
+            # this disposable root namespace so native preparation can inspect
+            # it; the production adapter still requires complete inspection.
+            "RUN apt-get -o APT::Sandbox::User=root update && "
+            "apt-get -o APT::Sandbox::User=root install -y --no-install-recommends "
             "/tmp/licasa.deb "
             "&& dpkg-query -W -f='${Status}\\n' licasa "
             "| grep -Fx 'install ok installed' && rm -rf /var/lib/apt/lists/*\n"
@@ -63,10 +67,11 @@ def main() -> None:
             # No desktop harness or undeclared runtime packages may help this check.
             "RUN bash -ec '. /opt/licasa-installer.sh; "
             "licasa_check_runtime_dependencies /usr/lib/licasa/lib "
-            "/usr/bin/licasa /usr/bin/licasa_diagnostics /usr/lib/licasa "
+            "/usr/bin/licasa /usr/bin/licasa.bin /usr/bin/licasa_diagnostics /usr/lib/licasa "
             "/usr/lib/x86_64-linux-gnu/qt6/plugins "
             "/usr/lib/x86_64-linux-gnu/qt6/qml'\n"
-            "RUN apt-get update && apt-get install -y --no-install-recommends "
+            "RUN apt-get -o APT::Sandbox::User=root update && "
+            "apt-get -o APT::Sandbox::User=root install -y --no-install-recommends "
             "xvfb x11-utils openbox weston libgl1-mesa-dri desktop-file-utils xdg-utils python3 "
             "&& rm -rf /var/lib/apt/lists/*\n"
         )

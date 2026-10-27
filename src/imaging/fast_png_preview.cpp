@@ -11,6 +11,9 @@
 
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <new>
+#include <utility>
 
 namespace Licasa {
 namespace {
@@ -61,6 +64,22 @@ void readFromQFile(png_structp png, png_bytep bytes, png_size_t length)
     }
 }
 
+// libpng errors jump back to setjmp. Keep every owning raster in stable heap
+// storage so that jump cannot bypass an automatic QImage's destruction.
+struct PngReadState {
+    png_structp png = nullptr;
+    png_infop info = nullptr;
+    FastPngPreview result;
+    QImage row;
+
+    ~PngReadState()
+    {
+        if (png) {
+            png_destroy_read_struct(&png, info ? &info : nullptr, nullptr);
+        }
+    }
+};
+
 void ignorePngWarning(png_structp, png_const_charp) {}
 void ignorePngError(png_structp png, png_const_charp) { longjmp(png_jmpbuf(png), 1); }
 } // namespace
@@ -78,21 +97,20 @@ static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
                                   quint64 maximumPixels, qsizetype maximumPreviewBytes,
                                   const std::atomic_bool* cancelled, bool retainFullBase)
 {
-    FastPngPreview result;
     if (maximumPreviewBytes <= 0 || !previewSize.isValid() || previewSize.isEmpty() ||
         (cancelled && cancelled->load(std::memory_order_relaxed))) {
-        return result;
+        return {};
     }
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
-        return result;
+        return {};
     }
     const QSize sourceSize = eligibleSize(file, maximumPixels);
     if (!sourceSize.isValid() ||
         quint64(previewSize.width()) * quint64(previewSize.height()) >
             quint64(maximumPreviewBytes) / 4 ||
         !file.seek(0)) {
-        return result;
+        return {};
     }
 
     const bool tracing = qEnvironmentVariableIsSet("LICASA_TRACE_FAST_PNG");
@@ -100,20 +118,24 @@ static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
     if (tracing) {
         timer.start();
     }
-    png_structp png =
-        png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, ignorePngError, ignorePngWarning);
-    if (!png) {
-        return result;
-    }
-    png_infop info = png_create_info_struct(png);
-    if (!info) {
-        png_destroy_read_struct(&png, nullptr, nullptr);
-        return result;
-    }
-    if (setjmp(png_jmpbuf(png))) {
-        png_destroy_read_struct(&png, &info, nullptr);
+    std::unique_ptr<PngReadState> state(new (std::nothrow) PngReadState);
+    if (!state) {
         return {};
     }
+    state->png =
+        png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, ignorePngError, ignorePngWarning);
+    if (!state->png) {
+        return {};
+    }
+    state->info = png_create_info_struct(state->png);
+    if (!state->info) {
+        return {};
+    }
+    if (setjmp(png_jmpbuf(state->png))) {
+        return {};
+    }
+    png_structp const png = state->png;
+    png_infop const info = state->info;
     png_set_user_limits(png, kMaximumDimension, kMaximumDimension);
     png_set_chunk_malloc_max(png, 8 * 1024 * 1024);
     png_set_read_fn(png, &file, readFromQFile);
@@ -125,7 +147,6 @@ static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
     if (width != png_uint_32(sourceSize.width()) || height != png_uint_32(sourceSize.height()) ||
         bitDepth != 8 || (colorType != PNG_COLOR_TYPE_RGB && colorType != PNG_COLOR_TYPE_RGBA) ||
         interlace != PNG_INTERLACE_NONE) {
-        png_destroy_read_struct(&png, &info, nullptr);
         return {};
     }
 
@@ -136,25 +157,22 @@ static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
     }
     png_read_update_info(png, info);
     if (png_get_rowbytes(png, info) != png_size_t(width) * 4) {
-        png_destroy_read_struct(&png, &info, nullptr);
         return {};
     }
     const QImage::Format imageFormat =
         colorType == PNG_COLOR_TYPE_RGB ? QImage::Format_RGB32 : QImage::Format_ARGB32;
     if (retainFullBase) {
-        result.fullBase = QImage(sourceSize, imageFormat);
+        state->result.fullBase = QImage(sourceSize, imageFormat);
     }
-    QImage row;
     if (!retainFullBase) {
-        row = QImage(int(width), 1, imageFormat);
+        state->row = QImage(int(width), 1, imageFormat);
     }
-    result.preview = QImage(previewSize, imageFormat);
-    if ((retainFullBase && result.fullBase.isNull()) || (!retainFullBase && row.isNull()) ||
-        result.preview.isNull() ||
-        result.fullBase.sizeInBytes() >
+    state->result.preview = QImage(previewSize, imageFormat);
+    if ((retainFullBase && state->result.fullBase.isNull()) ||
+        (!retainFullBase && state->row.isNull()) || state->result.preview.isNull() ||
+        state->result.fullBase.sizeInBytes() >
             qsizetype(ImageDecodeContract::maximumDecodedBaseCacheBytes) ||
-        result.preview.sizeInBytes() > maximumPreviewBytes) {
-        png_destroy_read_struct(&png, &info, nullptr);
+        state->result.preview.sizeInBytes() > maximumPreviewBytes) {
         return {};
     }
 
@@ -163,15 +181,15 @@ static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
     int previewY = 0;
     for (png_uint_32 y = 0; y < height; ++y) {
         if (cancelled && cancelled->load(std::memory_order_relaxed)) {
-            png_destroy_read_struct(&png, &info, nullptr);
             return {};
         }
-        uchar* decodedRow = retainFullBase ? result.fullBase.scanLine(int(y)) : row.scanLine(0);
+        uchar* decodedRow =
+            retainFullBase ? state->result.fullBase.scanLine(int(y)) : state->row.scanLine(0);
         png_read_row(png, decodedRow, nullptr);
         while (previewY < previewSize.height() &&
                quint64(previewY) * height / quint64(previewSize.height()) == y) {
             const auto* source = reinterpret_cast<const QRgb*>(decodedRow);
-            auto* output = reinterpret_cast<QRgb*>(result.preview.scanLine(previewY));
+            auto* output = reinterpret_cast<QRgb*>(state->result.preview.scanLine(previewY));
             int sourceX = 0;
             quint64 samplingRemainder = 0;
             for (int x = 0; x < previewSize.width(); ++x) {
@@ -188,22 +206,21 @@ static FastPngPreview readFastPng(const QString& path, const QSize& previewSize,
         }
     }
     png_read_end(png, info);
-    png_destroy_read_struct(&png, &info, nullptr);
     if (previewY != previewSize.height() ||
         (cancelled && cancelled->load(std::memory_order_relaxed))) {
         return {};
     }
     const QColorSpace displaySpace(QColorSpace::SRgb);
     if (retainFullBase) {
-        result.fullBase.setColorSpace(displaySpace);
+        state->result.fullBase.setColorSpace(displaySpace);
     }
-    result.preview.setColorSpace(displaySpace);
+    state->result.preview.setColorSpace(displaySpace);
     if (tracing) {
         qInfo().noquote() << "[Licasa] Fast PNG preview:" << "source=" << sourceSize
                           << "output=" << previewSize
                           << "elapsed_ms=" << double(timer.nsecsElapsed()) / 1000000.0;
     }
-    return result;
+    return std::move(state->result);
 }
 
 FastPngPreview readFastPngPreview(const QString& path, const QSize& previewSize,

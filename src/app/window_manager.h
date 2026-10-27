@@ -63,6 +63,13 @@ class WindowManager final : public QObject {
     void setImageProvider(AsyncImageProvider* provider) noexcept;
     void setImageSaveService(ImageSaveService* saveService) noexcept;
 
+    int visibleWindowCount() const;
+    QString userWorkBusyReason() const;
+    QString lifecycleBusyReason() const;
+    bool launchesAllowed() const;
+    void setLaunchesAllowed(bool allowed);
+    void quiesceForLifecycle();
+
     Q_INVOKABLE bool createWindow(const QUrl& initialUrl = QUrl(), bool startHidden = false,
                                   bool persistentShell = false);
     Q_INVOKABLE bool openInNewWindow(const QUrl& url);
@@ -85,6 +92,9 @@ class WindowManager final : public QObject {
   signals:
     void navigationKeyReleased(QObject* window, int direction);
     void initialGraphicsFailed(const QString& message);
+    void lifecycleStateChanged();
+    void quitRequested();
+    void quitBlocked(const QString& reason);
 
   protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -103,6 +113,7 @@ class WindowManager final : public QObject {
     QList<QPointer<QQuickWindow>> windows_;
     QHash<QQuickWindow*, std::shared_ptr<WindowMediaState>> mediaStates_;
     bool graphicsInitialized_ = false;
+    bool launchesAllowed_ = true;
 };
 
 } // namespace Licasa

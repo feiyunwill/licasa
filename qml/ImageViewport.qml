@@ -15,7 +15,7 @@
 
 import QtQuick
 import "ViewerMath.js" as ViewerMath
-import "components"
+import "FileUrls.js" as FileUrls
 
 Item {
     id: root
@@ -48,6 +48,9 @@ Item {
     required property bool rawFastPhase
     required property bool rawPreviewFirst
     property bool parallelFullResolutionEnabled: false
+    // Keep this eligibility stable when previewPhase turns false: the preloaded
+    // ordinary full request must retain the same key for slot-C promotion.
+    property bool previewFirstPreloadEnabled: false
     property bool rapidBrowseMode: false
     required property int previewSourceWidth
     required property int previewSourceHeight
@@ -159,6 +162,8 @@ Item {
     property int sampledPixelY: -1
     property var sampledPixelColor: null
     readonly property string activeRequestKey: activeImage ? String(activeImage.source) : ""
+    readonly property string activeParallelPairId:
+        FileUrls.presentedParallelPairId(activeRequestKey)
     readonly property size activeRequestSize: activeImage ? activeImage.sourceSize : Qt.size(0, 0)
     readonly property var pendingImage: pendingImageSlot === 0
         ? photoA
@@ -354,13 +359,39 @@ Item {
             : (root.previewPhase ? "preview"
                 : (root.rawPreviewFirst ? "raw-interactive" : "full"))
         const parallelStage = stage === "preview" && root.parallelFullResolutionEnabled
+            && !root.previewFirstPreloadEnabled
+            && root.speculativeFullKey.length > 0
+            && root.speculativeFullKey === fullRequestKey()
             ? "preview"
             : ""
         return requestKeyForStage(stage, parallelStage)
     }
 
     function fullRequestKey() {
-        return requestKeyForStage(root.rawPreviewFirst ? "raw-interactive" : "full", "full")
+        return requestKeyForStage(root.rawPreviewFirst ? "raw-interactive" : "full",
+                                  root.previewFirstPreloadEnabled ? "" : "full")
+    }
+
+    function startPreviewFirstFullPreload(completedKey) {
+        if (!root.previewFirstPreloadEnabled || !root.previewPhase || root.rawFastPhase
+                || root.rawPreviewFirst || root.sourceOverride.length > 0
+                || root.activeImageSlot < 0 || root.activeImageSlot === 2
+                || completedKey.length === 0 || completedKey !== requestKey())
+            return false
+
+        const key = fullRequestKey()
+        if (key.length === 0)
+            return false
+        if (root.speculativeFullKey === key)
+            return true
+        // A new ready preview already covers the old picture. Slot C may still
+        // hold its fading full image; retire that fade before reusing the slot.
+        if (root.fadingImageSlot === 2)
+            retireFadingImage()
+        root.speculativeFullKey = key
+        photoC.sourceSize = Qt.size(0, 0)
+        photoC.source = key
+        return true
     }
 
     function requestCurrentImage() {
@@ -370,7 +401,8 @@ Item {
         }
 
         if (root.speculativeFullKey.length > 0 &&
-                root.speculativeFullKey !== root.fullRequestKey() &&
+                (root.sourceOverride.length > 0
+                 || root.speculativeFullKey !== root.fullRequestKey()) &&
                 root.activeImageSlot !== 2 && root.fadingImageSlot !== 2) {
             root.speculativeFullKey = ""
             photoC.source = ""
@@ -378,6 +410,7 @@ Item {
 
         if (root.sourceOverride.length === 0 && root.providerSource.length > 0 && root.previewPhase &&
                 root.parallelFullResolutionEnabled &&
+                !root.previewFirstPreloadEnabled &&
                 root.activeImageSlot < 0 && root.speculativeFullKey.length === 0) {
             root.parallelPairGeneration += 1
             root.speculativeFullKey = root.fullRequestKey()
@@ -394,7 +427,14 @@ Item {
         if (key === pendingRequestKey)
             return
 
-        if (!root.previewPhase && !root.rawFastPhase &&
+        if (root.sourceOverride.length === 0 && pendingImageSlot < 0
+                && activeImage && activeImage.status === Image.Ready
+                && activeRequestKey === key) {
+            startPreviewFirstFullPreload(key)
+            return
+        }
+
+        if (root.sourceOverride.length === 0 && !root.previewPhase && !root.rawFastPhase &&
                 root.speculativeFullKey === root.fullRequestKey()) {
             if (photoC.status === Image.Ready || photoC.status === Image.Loading) {
                 pendingImageSlot = 2
@@ -485,6 +525,7 @@ Item {
             return
         }
 
+        const completedKey = pendingRequestKey
         retireFadingImage()
         const previousSlot = activeImageSlot
         if (previousSlot >= 0 && previousSlot !== slot) {
@@ -507,6 +548,7 @@ Item {
         if (fadingImageSlot >= 0)
             progressiveFadeCleanup.restart()
 
+        startPreviewFirstFullPreload(completedKey)
         root.imageReady()
     }
 
@@ -539,11 +581,21 @@ Item {
     onPreviewPhaseChanged: imageRequestTimer.restart()
     onRawFastPhaseChanged: imageRequestTimer.restart()
     onParallelFullResolutionEnabledChanged: {
-        if (!parallelFullResolutionEnabled && previewPhase &&
+        if (!parallelFullResolutionEnabled && !previewFirstPreloadEnabled && previewPhase &&
                 activeImageSlot !== 2 && fadingImageSlot !== 2) {
             speculativeFullKey = ""
             photoC.source = ""
         }
+    }
+    onPreviewFirstPreloadEnabledChanged: {
+        if (!previewFirstPreloadEnabled && previewPhase &&
+                activeImageSlot !== 2 && fadingImageSlot !== 2) {
+            speculativeFullKey = ""
+            photoC.source = ""
+        }
+        // Coalesce eligibility and source publication in the same event turn.
+        // requestCurrentImage reuses an already-ready matching preview.
+        imageRequestTimer.restart()
     }
     onAnimatedPlaybackActiveChanged: {
         if (root.animatedFrameReady)

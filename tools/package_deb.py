@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 
 from qt_runtime import runtime_packages
+from native_lifecycle import embedded_script, stage_payload
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,7 +75,7 @@ def package_dependencies(stage: Path, work: Path, target: str = "ubuntu-24.04") 
         "Package: licasa\nArchitecture: any\nDescription: Image viewer\n"
     )
     elf_files = sorted(path for path in (stage / "usr").rglob("*") if is_regular_elf(path))
-    if stage / "usr/bin/licasa" not in elf_files:
+    if stage / "usr/bin/licasa.bin" not in elf_files:
         raise RuntimeError("Staged package has no Licasa executable")
     private_libs = stage / "usr/lib/licasa/lib"
     command = [
@@ -91,6 +92,26 @@ def package_dependencies(stage: Path, work: Path, target: str = "ubuntu-24.04") 
     dependencies.extend(name for name in (*QML_RUNTIME, *TARGETS[target]["runtime_packages"])
                         if name not in present)
     return dependencies
+
+
+def write_maintainer_scripts(control_dir: Path) -> None:
+    scripts = {
+        "preinst": embedded_script("native", "prepare"),
+        "postinst": embedded_script("native", "complete"),
+        "prerm": embedded_script("native", "prepare", "remove"),
+        "postrm": embedded_script("native", "removed", "remove"),
+    }
+    for name, content in scripts.items():
+        if name == "prerm":
+            content = content.replace("set -eu\n", 'set -eu\n[ "${1:-}" = remove ] || exit 0\n', 1)
+        elif name == "postrm":
+            content = content.replace("set -eu\n", 'set -eu\ncase "${1:-}" in remove) native_operation=removed ;; purge) native_operation=purge ;; *) exit 0 ;; esac\n', 1)
+            content = content.replace(" native removed --action", ' native "$native_operation" --action', 1)
+        elif name == "postinst":
+            content = content.replace("set -eu\n", 'set -eu\n[ "${1:-}" = configure ] || exit 0\n', 1)
+        path = control_dir / name
+        path.write_text(content)
+        path.chmod(0o755)
 
 
 def main() -> None:
@@ -136,12 +157,18 @@ def main() -> None:
         stage.mkdir()
         environment = dict(os.environ, DESTDIR=str(stage))
         subprocess.run(["cmake", "--install", str(build)], env=environment, check=True)
-        executable = stage / "usr/bin/licasa"
+        executable = stage / "usr/bin/licasa.bin"
+        legacy_executable = stage / "usr/bin/licasa"
+        if not executable.exists() and is_regular_elf(legacy_executable):
+            legacy_executable.rename(executable)
         if not executable.is_file():
-            raise RuntimeError("CMake did not install /usr/bin/licasa")
+            raise RuntimeError("CMake did not install the native Licasa ELF")
+        stage_payload(stage, "native")
         control_dir = stage / "DEBIAN"
         control_dir.mkdir()
         dependencies = package_dependencies(stage, work, args.target)
+        dependencies.extend(name for name in ("python3", "bash", "util-linux")
+                            if name not in {dependency.split(" ", 1)[0] for dependency in dependencies})
         validate_abi_dependencies(dependencies, target["qt_version"], target["abi_package"])
         installed_kib = (
             sum(path.stat().st_size for path in (stage / "usr").rglob("*")
@@ -152,12 +179,14 @@ def main() -> None:
             f"Package: licasa\nVersion: {debian_version}\nArchitecture: {architecture}\n"
             "Maintainer: Sanxchep\nSection: graphics\nPriority: optional\n"
             f"Installed-Size: {installed_kib}\nDepends: {', '.join(dependencies)}\n"
+            "Pre-Depends: python3\n"
             f"X-Licasa-Target: {args.target}\n"
             f"X-Licasa-Runtime-Profile: {target['profile']}\n"
             "Homepage: https://github.com/sanxchep/licasa\n"
             "Description: Licasa image viewer\n"
             " A Qt image viewer with private HEIF, JPEG XL, RAW and AVIF decoders.\n"
         )
+        write_maintainer_scripts(control_dir)
         # Ubuntu's pkgbinarymangler wrapper expects a Debian source package.
         # This deb is assembled inside Snapcraft too, where those source-level
         # hooks print errors despite a successful dpkg-deb build.

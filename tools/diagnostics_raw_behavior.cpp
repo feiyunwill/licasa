@@ -15,6 +15,7 @@ class RawBehaviorCheck final : public QObject, public DiagnosticCheck {
     enum class Stage {
         AwaitFirstRaster = 0,
         AwaitFullDetail = 1,
+        ObservePolicyLimited = 2,
         AwaitFirstFullEdit = 5,
         AwaitRepeatFullEdit = 6,
     };
@@ -92,15 +93,8 @@ class RawBehaviorCheck final : public QObject, public DiagnosticCheck {
             if (window_->property("imageLimitedToPreview").toBool()) {
                 // Give any accidental timer time to fire; policy-limited images
                 // must never request a forbidden full development.
-                QTimer::singleShot(250, this, [this] {
-                    if (window_->property("rawFullDetailRequested").toBool() ||
-                        !window_->property("previewPhase").toBool()) {
-                        finish("Policy-limited RAW requested full development");
-                        return;
-                    }
-                    result_["full_detail_blocked_by_policy"] = true;
-                    finish();
-                });
+                stage_ = Stage::ObservePolicyLimited;
+                policyObservationStarted_ = now;
             } else {
                 // Production now promotes automatically shortly after the preview
                 // paints. Record that point as the start of full-detail loading;
@@ -112,12 +106,24 @@ class RawBehaviorCheck final : public QObject, public DiagnosticCheck {
 
         if (stage_ == Stage::AwaitFullDetail &&
             window_->property("imageLimitedToPreview").toBool()) {
+            // Deferred RAW metadata can establish the limit after first pixels.
+            // Start the same observation window when that policy arrives.
+            stage_ = Stage::ObservePolicyLimited;
+            policyObservationStarted_ = now;
+        }
+
+        if (stage_ == Stage::ObservePolicyLimited) {
             const bool stayedOnPreview = window_->property("previewPhase").toBool() &&
                                          !window_->property("rawFullDetailRequested").toBool();
             if (!stayedOnPreview) {
                 finish("Policy-limited RAW left the preview stage");
                 return;
             }
+            const qint64 observationNs = now - policyObservationStarted_;
+            if (observationNs < 250000000) {
+                return;
+            }
+            result_["policy_observation_ms"] = observationNs / 1e6;
             result_["full_detail_blocked_by_policy"] = true;
             finish();
             return;
@@ -202,6 +208,7 @@ class RawBehaviorCheck final : public QObject, public DiagnosticCheck {
     QObject* viewport_ = nullptr;
     QTimer timer_;
     qint64 started_ = 0, detailRequested_ = 0, editRequested_ = 0, lastBeat_ = 0, maxGapNs_ = 0;
+    qint64 policyObservationStarted_ = 0;
     Stage stage_ = Stage::AwaitFirstRaster;
     int readyCount_ = 0, readyBeforePromotion_ = 0;
     int readyBeforeEdit_ = 0;

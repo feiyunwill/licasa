@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Install an AppImage as an extracted, FUSE-free per-user desktop application.
 set -euo pipefail
+# New per-user state/application parents must not inherit a shared writable
+# umask. Existing directory permissions are inspected, never silently changed.
+umask 077
 
 # Shared with clean-package checks, before any desktop test tools are installed.
 # Only the dynamic loader inspects these files; no viewer or display is started.
@@ -66,7 +69,7 @@ licasa_diagnose() (
   set +e
   local artifact=${1:-} tool value key available parent options output status findings=0
   printf '%s\n' 'Licasa pre-start support report v1' 'application_started=no' 'network_access=no'
-  for tool in uname getconf ldd find cp chmod mkdir mktemp mv rm rmdir sed flock sha256sum dirname basename cat; do
+  for tool in uname getconf ldd find cp chmod mkdir mktemp mv rm rmdir sed flock sha256sum dirname basename cat python3; do
     if command -v "$tool" >/dev/null 2>&1; then
       printf 'tool.%s=present\n' "$tool"
     else
@@ -234,14 +237,14 @@ if ! licasa_setup_logging; then
   echo "Could not retain an installation log; this output is still available in the terminal." >&2
 fi
 
-commands=(cp chmod mkdir mktemp mv rm rmdir sed sha256sum flock dirname basename cat)
+commands=(cp chmod mkdir mktemp mv rm rmdir sed sha256sum flock dirname basename cat python3)
 if [[ $operation == install ]]; then
   commands=(uname getconf ldd find "${commands[@]}")
 fi
 for required_command in "${commands[@]}"; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     echo "Cannot $operation Licasa: the required system tool '$required_command' is missing." >&2
-    echo "Install your distribution's standard shell, file, util-linux and glibc tools, then retry." >&2
+    echo "Install your distribution's standard shell, file, util-linux, glibc tools and Python 3, then retry." >&2
     exit 1
   fi
 done
@@ -276,6 +279,10 @@ if [[ $operation == uninstall && ! -e $target && ! -L $target ]]; then
   exit 0
 fi
 mkdir -p "$apps"
+# An intentionally symlinked home/application parent has one physical managed
+# root. Use that same root in the viewer, its startup entry and controller.
+apps=$(cd "$apps" && pwd -P)
+target="$apps/licasa-appimage"
 # Keep the lock file in place: removing it could let another process lock a new
 # inode while this operation is still using the old one.
 exec 9>"$apps/.licasa-appimage.lock"
@@ -359,6 +366,11 @@ refresh_desktop() {
 
 work="$(mktemp -d "$apps/.licasa-appimage.XXXXXXXX")"
 backup="$work/previous-app"
+lifecycle_helper=""
+lifecycle_active=0
+lifecycle_committed=0
+legacy_uninstall=0
+legacy_installation_id=""
 committed=0
 app_changed=0
 integration_paths=()
@@ -366,6 +378,184 @@ integration_changed=()
 integration_existed=()
 desktop_new=""
 icon_new=""
+# The controller is shipped in new payloads. A source-tree copy also permits
+# fixture regressions without constructing an installable Qt runtime.
+find_lifecycle_helper() {
+  local candidate
+  for candidate in "${1:-}/usr/libexec/licasa/lifecycle_update.py" \
+      "$target/usr/libexec/licasa/lifecycle_update.py" \
+      "$(dirname "${BASH_SOURCE[0]}")/../tools/lifecycle_update.py"; do
+    if [[ -f $candidate && ! -L $candidate ]]; then
+      cp -- "$candidate" "$work/lifecycle_update.py"
+      lifecycle_helper="$work/lifecycle_update.py"
+      return 0
+    fi
+  done
+  if [[ $operation == uninstall ]]; then
+    legacy_uninstall=1
+    return 0
+  fi
+  echo "This older installation needs the current AppImage for safe lifecycle coordination." >&2
+  echo "Fully Quit Licasa, update using the current AppImage and installer, then retry removal." >&2
+  return 1
+}
+# The downloaded remover must work against releases which predate the shared
+# controller. This bridge checks its installation scope after full Quit; it never
+# contacts, signals, or executes the old application and makes no seamless or
+# durable-journal claim. Its existing rollback remains available.
+legacy_full_quit_check() {
+  python3 - "$target" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import socket
+import stat
+import sys
+
+root = os.path.abspath(sys.argv[1])
+expected = root + "/usr/bin/licasa"
+backup_prefix = str(Path(root).parent / ".licasa-appimage.")
+blocked = []
+uninspectable = []
+strict = os.environ.get("LICASA_STRICT_PROCESS_INSPECTION") == "1"
+identity = hashlib.sha256(f"{os.geteuid()}\nappimage\n{root}".encode()).hexdigest()[:32]
+receipts = {}
+journal = Path(root).parent / ("." + Path(root).name + ".licasa-lifecycle") / "transaction.json"
+if journal.exists() or journal.is_symlink():
+    info = journal.lstat()
+    parent = journal.parent.lstat()
+    if (journal.is_symlink() or journal.parent.is_symlink() or not stat.S_ISREG(info.st_mode)
+            or not stat.S_ISDIR(parent.st_mode) or info.st_uid != os.geteuid()
+            or parent.st_uid != os.geteuid() or (info.st_mode | parent.st_mode) & 0o077
+            or info.st_size > 1024 * 1024):
+        raise SystemExit("Unsafe lifecycle receipt; no files changed.")
+    record = json.loads(journal.read_text())
+    if record.get("root") != root:
+        raise SystemExit("Lifecycle receipt belongs to another installation; no files changed.")
+    receipts = record.get("predecessors", {})
+runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.geteuid()}"))
+endpoint = runtime / f"licasa-lc-{identity}.sock"
+if runtime.exists():
+    info = runtime.lstat()
+    if runtime.resolve() != runtime.absolute() or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise SystemExit("Unsafe lifecycle runtime directory; no files changed.")
+    if endpoint.exists() or endpoint.is_symlink():
+        info = endpoint.lstat()
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise SystemExit("Unsafe lifecycle endpoint; no files changed.")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+            peer.settimeout(1)
+            try:
+                peer.connect(str(endpoint))
+            except (FileNotFoundError, ConnectionRefusedError):
+                pass
+            except OSError:
+                blocked.append("unverifiable registered endpoint")
+            else:
+                # Without the installed controller, a registered peer always
+                # needs full Quit. Never execute or signal the old runtime.
+                blocked.append("registered endpoint")
+for directory in Path("/proc").iterdir():
+    if not directory.name.isdecimal():
+        continue
+    positive = False
+    try:
+        if directory.name in receipts:
+            try:
+                record = (directory / "stat").read_text()
+                started = record[record.rfind(")") + 2:].split()[19]
+                boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+                positive = f"{boot}:{started}" == receipts[directory.name]
+            except (PermissionError, ValueError, IndexError):
+                positive = True
+        status = (directory / "status").read_text()
+        credentials = next(line for line in status.splitlines() if line.startswith("Uid:"))
+        if not positive and os.geteuid() not in {int(value) for value in credentials.split()[1:]}:
+            continue
+        record = (directory / "stat").read_text()
+        if record[record.rfind(")") + 2:].split()[0] == "Z":
+            continue
+        executable = os.readlink(directory / "exe").removesuffix(" (deleted)")
+        matches = positive or executable == expected
+        positive = matches
+        if not matches and executable.startswith(backup_prefix) and executable.endswith("/previous-app/usr/bin/licasa"):
+            positive = True
+            matches = os.fsencode("APPDIR=" + root) in (directory / "environ").read_bytes().split(b"\0")
+        if matches:
+            blocked.append(directory.name)
+    except (FileNotFoundError, ProcessLookupError):
+        continue
+    except (PermissionError, StopIteration, ValueError, IndexError):
+        try:
+            positive = positive or os.fsencode(expected) in (directory / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            pass
+        try:
+            positive = positive or os.fsencode("APPDIR=" + root) in (directory / "environ").read_bytes().split(b"\0")
+        except OSError:
+            pass
+        if positive:
+            blocked.append(directory.name)
+        else:
+            uninspectable.append(directory.name)
+print(json.dumps({"inspectionScope": "installation", "unknownProcessCount": len(uninspectable),
+                  "globalAbsenceProven": False, "legacyFirstQuitRequired": True}, sort_keys=True), file=sys.stderr)
+if uninspectable and strict:
+    print("Process inspection is unavailable for PID " + ", ".join(uninspectable) +
+          "; cannot prove that this installation has stopped. Resolve the inspection restriction "
+          "before retrying removal. No application files were changed.", file=sys.stderr)
+    raise SystemExit(1)
+if blocked:
+    print("An older Licasa process is still running or cannot be identified safely. "
+          "Finish work and fully Quit Licasa, then retry removal. No application files were changed.", file=sys.stderr)
+    raise SystemExit(1)
+print(identity)
+PY
+}
+lifecycle() {
+  if [[ $legacy_uninstall -eq 1 ]]; then
+    if [[ ${1:-} == installation-id ]]; then printf '%s\n' "$legacy_installation_id"; fi
+    return 0
+  fi
+  python3 "$lifecycle_helper" "$@" --root "$target" --lock-fd 8
+}
+lock_lifecycle() {
+  if [[ $legacy_uninstall -eq 1 ]]; then
+    legacy_installation_id=$(legacy_full_quit_check)
+    echo "Legacy removal: prior full Quit is required; scoped checks completed, global absence is not proven."
+    return 0
+  fi
+  local gate="$apps/.licasa-appimage.licasa-lifecycle"
+  # Refuse links/shared ownership before opening the lock; the Python
+  # controller independently checks both the descriptor and linked inode.
+  if [[ -L $gate || ( -e $gate && ! -d $gate ) ]]; then
+    echo "Unsafe Licasa lifecycle gate: $gate" >&2
+    return 1
+  fi
+  mkdir -m 700 -p "$gate"
+  if [[ -L $gate/lock ]]; then
+    echo "Unsafe Licasa lifecycle lock: $gate/lock" >&2
+    return 1
+  fi
+  (umask 077; : >> "$gate/lock")
+  exec 8<>"$gate/lock"
+  if ! flock -n 8; then
+    echo "Another Licasa launch or update is in progress; retry when it finishes." >&2
+    return 1
+  fi
+  lifecycle recover
+}
+begin_lifecycle() {
+  if [[ $legacy_uninstall -eq 1 ]]; then
+    legacy_installation_id=$(legacy_full_quit_check)
+    return 0
+  fi
+  local arguments=(prepare --recovery-root "$work") path
+  for path in "${integration_paths[@]}"; do arguments+=(--integration "$path"); done
+  lifecycle "${arguments[@]}"
+  lifecycle_active=1
+}
 # Snapshot integration before any application or launcher mutation. The backup
 # contains the original file/link itself, not the contents of a symlink target.
 remember_integration() {
@@ -413,6 +603,11 @@ cleanup() {
     [[ -z $path ]] || rm -f -- "$path" || failed=1
   done
   if [[ $failed -eq 0 ]]; then
+    if [[ $lifecycle_active -eq 1 && $lifecycle_committed -eq 0 ]]; then
+      lifecycle mark --state verified || failed=1
+    fi
+  fi
+  if [[ $failed -eq 0 ]]; then
     rm -rf -- "$work" || failed=1
   fi
   if [[ $failed -ne 0 ]]; then
@@ -427,6 +622,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [[ $operation == uninstall ]]; then
+  find_lifecycle_helper
+  lock_lifecycle
   expected_desktop="$target/.licasa-appimage.desktop"
   if [[ ! -f $expected_desktop ]]; then
     # Compatibility with 0.7.1: supply its original XDG_DATA_HOME if customized.
@@ -444,25 +641,37 @@ if [[ $operation == uninstall ]]; then
   elif [[ -e $icon || -L $icon ]]; then
     echo "Keeping a modified or unrelated icon: $icon" >&2
   fi
-  if [[ -f $autostart && ! -L $autostart ]]; then
-    owned=0
-    exec_matches=0
-    while IFS= read -r line; do
-      [[ $line != X-Licasa-Background=1 ]] || owned=1
-      for executable in "$target/AppRun" "$target/usr/bin/licasa"; do
-        [[ $line != "Exec=$(quote_exec "$executable") --background" ]] || exec_matches=1
-        [[ $line != "Exec=$(quote_exec "$executable" legacy) --background" ]] || exec_matches=1
-      done
-    done < "$autostart"
-    if [[ $owned -eq 1 && $exec_matches -eq 1 ]]; then
-      remember_integration "$autostart"
+  installation_id=$(lifecycle installation-id)
+  for startup_entry in "$autostart" "$config_home/autostart/licasa-background-$installation_id.desktop"; do
+    if [[ -f $startup_entry && ! -L $startup_entry ]]; then
+      owned=0
+      exec_matches=0
+      wrong_owner=0
+      while IFS= read -r line; do
+        [[ $line != X-Licasa-Background=1 ]] || owned=1
+        if [[ $line == X-Licasa-Installation=* && $line != "X-Licasa-Installation=$installation_id" ]]; then
+          wrong_owner=1
+        fi
+        for executable in "$target/AppRun" "$target/usr/bin/licasa"; do
+          [[ $line != "Exec=/usr/bin/env $(quote_exec "$executable") --background" ]] || exec_matches=1
+          [[ $line != "Exec=$(quote_exec "$executable") --background" ]] || exec_matches=1
+          [[ $line != "Exec=$(quote_exec "$executable" legacy) --background" ]] || exec_matches=1
+        done
+      done < "$startup_entry"
+      if [[ $owned -eq 1 && $exec_matches -eq 1 && $wrong_owner -eq 0 ]]; then
+        remember_integration "$startup_entry"
+      fi
     fi
-  fi
+  done
+  begin_lifecycle
+  lifecycle mark --state replacing
   for ((index=0; index<${#integration_paths[@]}; index++)); do
     integration_changed[index]=1
     rm -- "${integration_paths[index]}"
   done
   mv -- "$target" "$backup"
+  lifecycle mark --state verified
+  lifecycle_committed=1
   committed=1
   refresh_desktop removed
   echo "Removed the per-user Licasa AppImage installation. Settings and photos were kept."
@@ -496,6 +705,18 @@ write_desktop "$source_desktop" > "$extracted/.licasa-appimage.desktop"
 printf '%s\n' "$marker" > "$extracted/.licasa-appimage-install"
 printf '%s\0' 1 "$data_home" "$config_home" > "$extracted/.licasa-appimage-paths"
 cp -- "${BASH_SOURCE[0]}" "$extracted/install-licasa-appimage.sh"
+find_lifecycle_helper "$extracted"
+identity_check=()
+if [[ -f $extracted/usr/libexec/licasa/lifecycle_update.py ]]; then
+  identity_check=(--identity-check)
+fi
+# Retain the controller with legacy payloads too. It still refuses to stop an
+# uncooperative old viewer and requires a one-time full Quit for that bridge.
+if [[ ! -f $extracted/usr/libexec/licasa/lifecycle_update.py ]]; then
+  mkdir -p "$extracted/usr/libexec/licasa"
+  cp -- "$lifecycle_helper" "$extracted/usr/libexec/licasa/lifecycle_update.py"
+fi
+lock_lifecycle
 mkdir -p "$desktop_dir" "$icon_dir"
 remember_integration "$desktop"
 remember_integration "$icon"
@@ -507,6 +728,8 @@ icon_new=$(mktemp "$icon_dir/.licasa-icon.XXXXXXXX")
 cp -- "$extracted/.licasa-appimage.desktop" "$desktop_new"
 cp -- "$source_icon" "$icon_new"
 chmod 644 "$desktop_new" "$icon_new"
+begin_lifecycle
+lifecycle mark --state replacing
 if [[ -e $target ]]; then
   mv -- "$target" "$backup"
 fi
@@ -516,9 +739,13 @@ integration_changed[1]=1
 mv -fT -- "$icon_new" "$icon"
 integration_changed[0]=1
 mv -fT -- "$desktop_new" "$desktop"
+lifecycle mark --state committed
+lifecycle verify "${identity_check[@]}"
+lifecycle_committed=1
 committed=1
 refresh_desktop installed
 echo "Installed Licasa in $target"
 echo "Find 'Licasa (AppImage)' in your application menu or use Open With in your file manager."
 echo "Remove it with: bash \"$target/install-licasa-appimage.sh\" --uninstall"
 echo "A graphical desktop is needed to open windows; installation did not start the application."
+echo "Background startup is deferred to the next desktop login."

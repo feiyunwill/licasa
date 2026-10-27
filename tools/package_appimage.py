@@ -14,6 +14,7 @@ import tempfile
 from urllib.request import Request, urlopen
 
 from qt_runtime import module_directory, requirements, validate_runtime
+from lifecycle_update import install_appimage_launcher
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -204,6 +205,15 @@ def main() -> None:
         appdir = work / "Licasa.AppDir"
         appdir.mkdir()
         run(["dpkg-deb", "--extract", str(package), str(appdir)])
+        # A native Debian transaction uses a root-owned launcher before its
+        # ELF. Portable packages have their own managed/portable launch gate,
+        # so restore the ordinary payload layout before linuxdeploy scans it.
+        native_binary = appdir / "usr/bin/licasa.bin"
+        if native_binary.is_file():
+            (appdir / "usr/bin/licasa").unlink(missing_ok=True)
+            native_binary.rename(appdir / "usr/bin/licasa")
+        for native_only in ("usr/lib/licasa/native_lifecycle.py", "usr/share/licasa/native-runtime.json"):
+            (appdir / native_only).unlink(missing_ok=True)
         desktop = appdir / "usr/share/applications/licasa.desktop"
         icon = appdir / "usr/share/icons/hicolor/512x512/apps/licasa.png"
         for path in (appdir / "usr/bin/licasa", desktop, icon):
@@ -303,6 +313,7 @@ def main() -> None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(runtime_report, indent=2) + "\n")
         built = work / f"Licasa-{version}-x86_64.AppImage"
+        install_appimage_launcher(appdir)
         run([str(tools_dir / "appimagetool-x86_64.AppImage"), "--runtime-file",
              str(tools_dir / "runtime-x86_64"), str(appdir), str(built)],
             env=env, cwd=work)

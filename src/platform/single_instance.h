@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QJsonObject>
 #include <QLocalServer>
 #include <QObject>
 #include <QStringList>
@@ -8,6 +9,7 @@
 namespace Licasa {
 
 class WindowManager;
+class ApplicationLifecycle;
 
 struct LaunchOptions {
     QUrl initialUrl;
@@ -16,13 +18,15 @@ struct LaunchOptions {
 };
 
 LaunchOptions parseLaunchOptions(const QStringList& arguments);
-bool forwardLaunchToExistingInstance(const LaunchOptions& options);
+enum class ForwardLaunchResult { NoInstance, Forwarded, Blocked };
+ForwardLaunchResult forwardLaunchToExistingInstance(const LaunchOptions& options);
 
 class SingleInstanceServer final : public QObject {
     Q_OBJECT
 
   public:
-    explicit SingleInstanceServer(WindowManager* windowManager, QObject* parent = nullptr);
+    explicit SingleInstanceServer(WindowManager* windowManager, ApplicationLifecycle* lifecycle,
+                                  QObject* parent = nullptr);
 
     bool start();
     void stop();
@@ -31,9 +35,10 @@ class SingleInstanceServer final : public QObject {
     void acceptPendingConnections();
 
   private:
-    void processPayload(const QByteArray& payload);
+    QJsonObject processPayload(const QByteArray& payload);
 
     WindowManager* windowManager_ = nullptr;
+    ApplicationLifecycle* lifecycle_ = nullptr;
     QLocalServer server_;
 };
 
