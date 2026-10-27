@@ -88,15 +88,20 @@ class CudaEditDevice final : public EditComputeDevice {
              const std::atomic_bool* cancelled) override
     {
         if (cuCtxPushCurrent(context) != CUDA_SUCCESS) {
+            invalidateResidentBase();
             return false;
         }
 
         CUdeviceptr transientInput = 0;
         CUdeviceptr transientOutput = 0;
+        bool succeeded = false;
         const auto release = qScopeGuard([&] {
             // A failed/cancelled launch must finish before transient memory can
             // be freed or retained staging can be reused by the next request.
-            cuCtxSynchronize();
+            const bool drained = cuCtxSynchronize() == CUDA_SUCCESS;
+            if (!succeeded || !drained) {
+                invalidateResidentBase();
+            }
             if (transientInput) {
                 cuMemFree(transientInput);
             }
@@ -132,18 +137,14 @@ class CudaEditDevice final : public EditComputeDevice {
 
         const bool residentHit = allowResidentBase && residentSourceIdentity == sourceIdentity &&
                                  residentSourceBytes == bytes;
+        if (reusable && !residentHit) {
+            // A successful replacement upload followed by another driver
+            // failure must not leave the old source receipt attached to it.
+            invalidateResidentBase();
+        }
         if ((!residentHit && cuMemcpyHtoD(input, source.constBits(), bytes) != CUDA_SUCCESS) ||
             cuMemcpyHtoD(parameterBuffer, values.data(), sizeof(values)) != CUDA_SUCCESS) {
             return false;
-        }
-        if (allowResidentBase && !residentHit) {
-            residentSourceIdentity = sourceIdentity;
-            residentSourceBytes = bytes;
-        }
-        // Two passes swap back into reusableInput on the second kernel, so the
-        // retained source is no longer immutable after this request.
-        if (reusable && color && sharpen) {
-            invalidateResidentBase();
         }
 
         int width = source.width();
@@ -174,7 +175,14 @@ class CudaEditDevice final : public EditComputeDevice {
             (cancelled && cancelled->load(std::memory_order_relaxed))) {
             return false;
         }
-        return cuMemcpyDtoH(destination.bits(), input, bytes) == CUDA_SUCCESS;
+        succeeded = cuMemcpyDtoH(destination.bits(), input, bytes) == CUDA_SUCCESS;
+        if (succeeded && allowResidentBase) {
+            // Keep a receipt only after the complete request is confirmed.
+            // Combined passes overwrite the base and never publish residency.
+            residentSourceIdentity = sourceIdentity;
+            residentSourceBytes = bytes;
+        }
+        return succeeded;
     }
 
     void releaseImageBuffers() override

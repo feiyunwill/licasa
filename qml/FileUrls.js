@@ -51,6 +51,38 @@ function parts(value) {
     }
 }
 
+function previewFirstFullResolution(value) {
+    return ["png", "pnm", "ppm", "pgm", "pbm"].indexOf(parts(value).suffix) >= 0
+}
+
+function queryValue(value, name) {
+    const text = String(value)
+    const question = text.indexOf("?")
+    if (question < 0)
+        return ""
+    const entries = text.substring(question + 1).split("#", 1)[0].split("&")
+    for (let index = 0; index < entries.length; ++index) {
+        const separator = entries[index].indexOf("=")
+        if (separator < 0)
+            continue
+        if (entries[index].substring(0, separator) === name) {
+            try {
+                return decodeURIComponent(entries[index].substring(separator + 1))
+            } catch (error) {
+                return ""
+            }
+        }
+    }
+    return ""
+}
+
+function presentedParallelPairId(value) {
+    if (queryValue(value, "licasa_stage") !== "preview"
+            || queryValue(value, "licasa_parallel") !== "preview")
+        return ""
+    return queryValue(value, "licasa_pair")
+}
+
 function suggestedCopy(value, label, suffix) {
     const source = parts(value)
     if (source.stem.length === 0 || suffix.length === 0)

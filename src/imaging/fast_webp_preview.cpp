@@ -1,5 +1,5 @@
-#include "fast_webp_preview.h"
-#include "parallel_smooth_scale.h"
+#include "imaging/fast_webp_preview.h"
+#include "imaging/parallel_smooth_scale.h"
 
 #include <QColorSpace>
 #include <QFile>
@@ -9,6 +9,7 @@
 
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace Licasa {
 QImage readFastWebpPreview(const QString& path, const QSize& target, quint64 maximumPixels,

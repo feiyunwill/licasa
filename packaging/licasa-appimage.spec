@@ -2,6 +2,8 @@
 %global __brp_strip %{nil}
 %global __brp_strip_comment_note %{nil}
 %global __brp_strip_static_archive %{nil}
+%global __brp_mangle_shebangs %{nil}
+%global __brp_python_bytecompile %{nil}
 %global __requires_exclude_from ^/opt/licasa/.*$
 %global __provides_exclude_from ^/opt/licasa/.*$
 
@@ -13,9 +15,15 @@ License:        BSD-2-Clause AND BSD-3-Clause AND LGPL-2.1-only AND LGPL-3.0-or-
 URL:            https://github.com/sanxchep/licasa
 Source0:        Licasa-%{version}-x86_64.AppImage
 Source1:        stage_portable_package.py
+Source2:        native_lifecycle.py
 BuildArch:      x86_64
 BuildRequires:  python3
 Requires:       bash
+Requires:       python3, util-linux-core
+Requires(pretrans): /usr/bin/python3
+Requires(preun): /usr/bin/python3
+Requires(post): /usr/bin/python3
+Requires(postun): /usr/bin/python3
 Requires:       libX11, libXext, libxcb, libxkbcommon
 Requires:       mesa-libGL, mesa-libEGL, libglvnd-opengl
 Requires:       fontconfig, harfbuzz, dbus-libs
@@ -30,6 +38,20 @@ installation time. This package runs without FUSE.
 
 %install
 python3 %{SOURCE1} %{SOURCE0} %{buildroot}
+
+# tools/package_rpm.py embeds the trusted incoming adapter here. A pretrans
+# failure aborts replacement before the old runtime files are changed.
+%pretrans
+@NATIVE_PRETRANS@
+
+%post
+@NATIVE_COMPLETE@
+
+%preun
+@NATIVE_PREREMOVE@
+
+%postun
+@NATIVE_REMOVED@
 
 %files
 /usr/bin/licasa

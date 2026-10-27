@@ -174,7 +174,8 @@ find_live_licasa_child() {
         candidate_pid=${pid_dir##*/}
         [ "$candidate_pid" != "$viewer_pid" ] || continue
         IFS= read -r candidate_name < "$comm_file" || continue
-        [ "$candidate_name" = licasa ] || continue
+        # Native packages keep the viewer ELF beside the pre-loader launcher.
+        case "$candidate_name" in licasa|licasa.bin) ;; *) continue ;; esac
         read -r stat_pid stat_comm stat_state stat_rest < "$pid_dir/stat" || continue
         if [ "$stat_state" != Z ]; then
             echo "$candidate_pid"

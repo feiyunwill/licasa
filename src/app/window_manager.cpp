@@ -22,6 +22,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QKeyEvent>
+#include <QMetaMethod>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickItem>
@@ -106,10 +107,87 @@ void WindowManager::setImageProvider(AsyncImageProvider* provider) noexcept
 void WindowManager::setImageSaveService(ImageSaveService* saveService) noexcept
 {
     imageSaveService_ = saveService;
+    if (saveService) {
+        connect(saveService, &ImageSaveService::busyChanged, this,
+                &WindowManager::lifecycleStateChanged);
+    }
+}
+
+int WindowManager::visibleWindowCount() const
+{
+    return int(
+        std::count_if(windows_.cbegin(), windows_.cend(), [](const QPointer<QQuickWindow>& window) {
+            return window && window->isVisible();
+        }));
+}
+
+QString WindowManager::userWorkBusyReason() const
+{
+    if (imageSaveService_ && imageSaveService_->busy()) {
+        return QStringLiteral("saving");
+    }
+    for (const auto& state : mediaStates_) {
+        if (state && ((state->motionService && state->motionService->busy()) ||
+                      (state->animationService && state->animationService->busy()))) {
+            return QStringLiteral("exporting");
+        }
+    }
+    for (const QPointer<QQuickWindow>& window : windows_) {
+        if (!window) {
+            continue;
+        }
+        const QString reason = window->property("lifecycleBusyReason").toString();
+        if (!reason.isEmpty() && reason != QStringLiteral("opening-image")) {
+            return reason;
+        }
+    }
+    return {};
+}
+
+QString WindowManager::lifecycleBusyReason() const
+{
+    const QString reason = userWorkBusyReason();
+    if (!reason.isEmpty()) {
+        return reason;
+    }
+    for (const QPointer<QQuickWindow>& window : windows_) {
+        if (window &&
+            window->property("lifecycleBusyReason").toString() == QStringLiteral("opening-image")) {
+            return QStringLiteral("opening-image");
+        }
+    }
+    return visibleWindowCount() > 0 ? QStringLiteral("visible-window") : QString{};
+}
+
+bool WindowManager::launchesAllowed() const { return launchesAllowed_; }
+
+void WindowManager::setLaunchesAllowed(bool allowed)
+{
+    if (launchesAllowed_ == allowed) {
+        return;
+    }
+    launchesAllowed_ = allowed;
+    emit lifecycleStateChanged();
+}
+
+void WindowManager::quiesceForLifecycle()
+{
+    for (const QPointer<QQuickWindow>& window : windows_) {
+        if (window) {
+            QMetaObject::invokeMethod(window, "stopOptionalWorkForLifecycle", Qt::DirectConnection);
+        }
+    }
+    if (imageSaveService_) {
+        imageSaveService_->cancelSizeEstimate();
+    }
+    releasePictureResources();
 }
 
 bool WindowManager::createWindow(const QUrl& initialUrl, bool startHidden, bool persistentShell)
 {
+    if (!launchesAllowed_) {
+        return false;
+    }
     if (!engine_) {
         return false;
     }
@@ -236,6 +314,8 @@ QObject* WindowManager::ensureMotionPhotoExportService(QObject* windowObject)
     }
 
     state->motionService = service;
+    connect(service, &MotionPhotoExportService::busyChanged, this,
+            &WindowManager::lifecycleStateChanged);
     window->setProperty("motionPhotoExportService",
                         QVariant::fromValue(static_cast<QObject*>(service)));
     return service;
@@ -263,6 +343,8 @@ QObject* WindowManager::ensureAnimationExportService(QObject* windowObject)
 
     auto* service = new AnimationExportService(*imageResourcePolicy_, window);
     state->animationService = service;
+    connect(service, &AnimationExportService::busyChanged, this,
+            &WindowManager::lifecycleStateChanged);
     window->setProperty("animationExportService",
                         QVariant::fromValue(static_cast<QObject*>(service)));
     return service;
@@ -314,7 +396,7 @@ QObject* WindowManager::ensurePreferredCoverFrameCoordinator(QObject* windowObje
 
 bool WindowManager::openInNewWindow(const QUrl& url)
 {
-    if (!url.isValid()) {
+    if (!launchesAllowed_ || !url.isValid()) {
         return false;
     }
 
@@ -375,7 +457,7 @@ bool WindowManager::hasDecodedFullBase(const QUrl& url) const
 void WindowManager::prepareNearbyPreviews(const QList<QUrl>& urls, const QSize& requestedSize,
                                           int maximumImageMemoryMiB)
 {
-    if (imageProvider_) {
+    if (launchesAllowed_ && imageProvider_) {
         imageProvider_->prepareNearbyPreviews(urls, requestedSize, maximumImageMemoryMiB);
     }
 }
@@ -435,10 +517,25 @@ void WindowManager::destroyAllWindows()
     }
 }
 
-void WindowManager::quitApplication() { QCoreApplication::exit(0); }
+void WindowManager::quitApplication()
+{
+    const QString reason = userWorkBusyReason();
+    if (!reason.isEmpty()) {
+        emit quitBlocked(reason);
+        return;
+    }
+    if (isSignalConnected(QMetaMethod::fromSignal(&WindowManager::quitRequested))) {
+        emit quitRequested();
+    } else {
+        QCoreApplication::exit(0);
+    }
+}
 
 void WindowManager::showAnyWindow()
 {
+    if (!launchesAllowed_) {
+        return;
+    }
     pruneDeadWindows();
 
     for (const QPointer<QQuickWindow>& window : windows_) {
@@ -474,6 +571,7 @@ void WindowManager::registerWindow(QQuickWindow* window)
     window->setPersistentSceneGraph(false);
 
     connect(window, &QWindow::visibleChanged, window, [this, window](bool visible) {
+        emit lifecycleStateChanged();
         if (visible) {
             return;
         }
@@ -497,6 +595,7 @@ void WindowManager::registerWindow(QQuickWindow* window)
             (void)window->grabWindow();
         });
     });
+    connect(window, SIGNAL(lifecycleBusyReasonChanged()), this, SIGNAL(lifecycleStateChanged()));
 
     connect(
         window, &QQuickWindow::sceneGraphInitialized, window,
@@ -520,9 +619,11 @@ void WindowManager::registerWindow(QQuickWindow* window)
         Qt::QueuedConnection);
 
     windows_.append(QPointer<QQuickWindow>(window));
+    emit lifecycleStateChanged();
     connect(window, &QObject::destroyed, this, [this, window]() {
         mediaStates_.remove(window);
         pruneDeadWindows();
+        emit lifecycleStateChanged();
     });
 }
 

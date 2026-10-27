@@ -28,14 +28,18 @@ def build_recipe(target: str) -> str:
     return (
         f"FROM {base}\nCOPY candidate.deb /tmp/candidate.deb\n"
         f"RUN test \"$(dpkg-deb --field /tmp/candidate.deb X-Licasa-Target)\" = {target} "
-        "&& apt-get update && apt-get install -y --no-install-recommends /tmp/candidate.deb "
+        # The disposable build root lacks SYS_PTRACE; its APT worker must stay
+        # inspectable without weakening native production process validation.
+        "&& apt-get -o APT::Sandbox::User=root update "
+        "&& apt-get -o APT::Sandbox::User=root install -y --no-install-recommends /tmp/candidate.deb "
         "&& rm -rf /var/lib/apt/lists/*\n"
         "COPY installer.sh /opt/runtime-check.sh\n"
         # GTK/MATE may not mask missing declared package dependencies.
         "RUN bash -ec '. /opt/runtime-check.sh; licasa_check_runtime_dependencies "
-        "/usr/lib/licasa/lib /usr/bin/licasa /usr/bin/licasa_diagnostics /usr/lib/licasa "
+        "/usr/lib/licasa/lib /usr/bin/licasa /usr/bin/licasa.bin /usr/bin/licasa_diagnostics /usr/lib/licasa "
         "/usr/lib/x86_64-linux-gnu/qt6/plugins /usr/lib/x86_64-linux-gnu/qt6/qml'\n"
-        "RUN apt-get update && apt-get install -y --no-install-recommends "
+        "RUN apt-get -o APT::Sandbox::User=root update && "
+        "apt-get -o APT::Sandbox::User=root install -y --no-install-recommends "
         + " ".join(DESKTOP_PACKAGES) + " && rm -rf /var/lib/apt/lists/*\n"
     )
 

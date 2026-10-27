@@ -31,13 +31,18 @@ def run_dialog_recovery(image: str, *, app: str, diagnostic: str, sample: Path,
 from pathlib import Path
 sys.path.insert(0, '/qualification/tools')
 from qt_runtime import validate_runtime
+from verify_dialog_interactions import application_executable
 root = Path({RECOVERY_ROOT!r})
 qml = Path({isolated_qml!r})
 if {native!r}:
     (root / 'usr/bin').mkdir(parents=True)
     (root / 'usr/lib').mkdir()
     (root / 'usr/lib/licasa').symlink_to('/usr/lib/licasa', target_is_directory=True)
-    shutil.copy2({app!r}, {broken_app!r})
+    # Native packages keep their pre-exec transaction wrapper at the public
+    # path. This diagnostic relocation needs the actual ELF and its local Qt
+    # config, so it cannot follow the wrapper back into the working runtime.
+    source_app = application_executable(Path({app!r}))
+    shutil.copy2(source_app, {broken_app!r})
     shutil.copy2({diagnostic!r}, {broken_diagnostic!r})
     # Keep installed startup assets when relocating the native executables.
     shutil.copytree(Path({app!r}).parents[1] / 'share/licasa',
@@ -48,10 +53,11 @@ if {native!r}:
         'Plugins=/usr/lib/x86_64-linux-gnu/qt6/plugins\\n'
         'QmlImports=qml\\nQml2Imports=qml\\n')
 else:
+    source_app = Path({app!r})
     shutil.copytree(str(Path({qml_root!r}).parents[1]), root, symlinks=True)
 digest = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
 inputs = {{'missing_module': {MISSING_MODULE!r}, 'isolated_qml_root': str(qml),
-          'original_app_sha256': digest({app!r}),
+          'original_app_sha256': digest(source_app),
           'original_diagnostic_sha256': digest({diagnostic!r})}}
 assert inputs['original_app_sha256'] == digest({broken_app!r})
 assert inputs['original_diagnostic_sha256'] == digest({broken_diagnostic!r})

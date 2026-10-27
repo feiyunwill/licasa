@@ -113,9 +113,9 @@ TemporalControls {
     durationMs: motionMode ? temporalControls.motionSession.durationMs : 0
 
     onTogglePlaybackRequested: {
+        if (!interactionEnabled)
+            return
         if (motionMode) {
-            if (!interactionEnabled)
-                return
             temporalControls.motionSession.togglePlayback()
             return
         }
@@ -124,9 +124,10 @@ TemporalControls {
     }
 
     onSeekRequested: function(normalizedPosition) {
+        if (!interactionEnabled)
+            return
         if (motionMode) {
-            if (!interactionEnabled
-                    || !temporalControls.motionSession.seekable
+            if (!temporalControls.motionSession.seekable
                     || temporalControls.motionSession.durationMs <= 0)
                 return
             const targetMs = Math.round(Math.max(0.0, Math.min(1.0,
@@ -144,7 +145,7 @@ TemporalControls {
     }
 
     onStepRequested: function(delta) {
-        if (motionMode)
+        if (!interactionEnabled || motionMode)
             return
         if (!temporalControls.animationController || temporalControls.animationController.frameCount <= 1)
             return

@@ -186,6 +186,11 @@ jobs:
           cp "build/qualification/arch/licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256" dist/arch/
           cp build/qualification/arch/PKGBUILD dist/arch/
           cp build/qualification/arch/PKGBUILD.sha256 dist/arch/
+          cp build/qualification/arch/native_lifecycle.py dist/arch/
+          cp build/qualification/arch/licasa.install dist/arch/
+          cp build/qualification/arch/licasa-lifecycle.hook dist/arch/
+          cp build/qualification/arch/PKGBUILD.sources.sha256 dist/arch/
+          (cd dist/arch && sha256sum --check PKGBUILD.sources.sha256)
           cp build/qualification/arch/install-smoke.json dist/arch/
       - uses: actions/upload-artifact@v7
         with:
@@ -389,6 +394,7 @@ jobs:
           (cd dist/rpm && sha256sum --check "licasa-appimage-${VERSION}-1.fc44.x86_64.rpm.sha256")
           (cd dist/arch && sha256sum --check "licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256")
           (cd dist/arch && sha256sum --check PKGBUILD.sha256)
+          (cd dist/arch && sha256sum --check PKGBUILD.sources.sha256)
           (cd dist/snap && sha256sum --check "licasa_${VERSION}_amd64.snap.sha256")
       - name: Install GitHub CLI
         run: |
@@ -413,6 +419,7 @@ jobs:
             cat "dist/rpm/licasa-appimage-${VERSION}-1.fc44.x86_64.rpm.sha256"
             cat "dist/arch/licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256"
             cat "dist/arch/PKGBUILD.sha256"
+            cat "dist/arch/PKGBUILD.sources.sha256"
             cat "dist/snap/licasa_${VERSION}_amd64.snap.sha256"
             printf "\`\`\`\n"
             printf "\nSource commit: \`%s\`.\n" "$GITHUB_SHA"
@@ -432,6 +439,10 @@ jobs:
             "dist/arch/licasa-appimage-${VERSION}-1-x86_64.pkg.tar.zst.sha256" \
             "dist/arch/PKGBUILD" \
             "dist/arch/PKGBUILD.sha256" \
+            "dist/arch/native_lifecycle.py" \
+            "dist/arch/licasa.install" \
+            "dist/arch/licasa-lifecycle.hook" \
+            "dist/arch/PKGBUILD.sources.sha256" \
             "dist/snap/licasa_${VERSION}_amd64.snap" \
             "dist/snap/licasa_${VERSION}_amd64.snap.sha256" \
             --target "$GITHUB_SHA" --title "Licasa $RELEASE_TAG" \

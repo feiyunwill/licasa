@@ -292,14 +292,27 @@ def main() -> int:
         snapshot("failure")
         return 1
     finally:
-        if app:
-            subprocess.run([str(args.app.resolve()), "--quit"], env=os.environ, stdout=log, stderr=subprocess.STDOUT, timeout=8)
-            try:
-                app.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                app.terminate()
-                app.wait(timeout=4)
         report["atspi_snapshots"] = snapshots
+        # Picker scenarios can leave intentional drafts. Capture their outcome
+        # before attempting cleanup; a busy Quit is not a failed picker test.
+        args.output.write_text(json.dumps(report, indent=2) + "\n")
+        if app and app.poll() is None:
+            report["cleanup"] = {"qualifies_graceful_shutdown": False}
+            try:
+                quit_result = subprocess.run([str(args.app.resolve()), "--quit"], env=os.environ,
+                                             stdout=log, stderr=subprocess.STDOUT, timeout=12)
+                report["cleanup"]["quit_exit_code"] = quit_result.returncode
+                try:
+                    app.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    if os.environ.get("LICASA_VIRTUAL_DESKTOP") == "1":
+                        app.kill()  # Owned virtual fixture only, after outcome capture.
+                        app.wait(timeout=4)
+                        report["cleanup"]["forced_owned_virtual_fixture"] = True
+                    else:
+                        report["cleanup"]["deferred_to_preserve_drafts"] = True
+            except (OSError, subprocess.SubprocessError) as error:
+                report["cleanup"]["error"] = str(error)
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         log.close()
 

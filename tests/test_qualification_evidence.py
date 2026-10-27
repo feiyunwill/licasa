@@ -13,6 +13,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import qualification_evidence as evidence
+import check_package_report
 from package_dialog_recovery import MISSING_MODULE, RECOVERY_ROOT
 from package_motion_checks import FFMPEG
 from package_reader_checks import READER_SAMPLES, validate_readers
@@ -133,6 +134,21 @@ class QualificationEvidenceTests(unittest.TestCase):
             mutate(recovery)
             with self.subTest(mutate=mutate), self.assertRaises(ValueError):
                 evidence.validate_report(changed, target, self.manifest)
+
+    def test_local_qualifier_cannot_succeed_before_final_ci_contract_accepts_its_report(self):
+        report = json.loads((self.reports / "supported/raw/report.json").read_text())
+        package = self.packages / "deb/licasa_1.2.3.deb"
+        report["package_sha256"] = evidence.digest(package)
+        output = self.root / "local/report.json"
+        with patch.object(check_package_report, "load_manifest", return_value=self.manifest):
+            check_package_report.write_checked_report(report, target_id="supported", package=package, output=output)
+            self.assertEqual(json.loads(output.read_text()), report)
+            # This is the actual hosted mismatch: the normal session hashes
+            # the launch script, while recovery hashes the relocated ELF.
+            report["dialog_interactions"][1]["app_sha256"] = "a" * 64
+            with self.assertRaisesRegex(ValueError, "exact installed executables"):
+                check_package_report.write_checked_report(report, target_id="supported", package=package, output=output)
+            self.assertEqual(json.loads(output.read_text()), report, "Keep failed evidence for diagnosis")
 
     def test_motion_requires_all_rotated_display_cases_and_actual_production_controls(self):
         target = self.manifest["targets"][0]

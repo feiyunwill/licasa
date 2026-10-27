@@ -1,9 +1,13 @@
 #include "imaging/async_image_provider.h"
 #include "imaging/compute/edit_compute.h"
+#include "imaging/fast_pnm_preview.h"
 #include "imaging/image_decode_contract.h"
 #include "imaging/image_edit_pipeline.h"
 #include "imaging/image_processing.h"
 #include "imaging/image_resource_policy.h"
+#include "imaging/nearby_preview_cache.h"
+#include "imaging/parallel_decode_pair.h"
+#include "imaging/preview_decode_support.h"
 #ifdef LICASA_HAVE_FAST_PNG_PREVIEW
 #include "imaging/fast_png_preview.h"
 #endif
@@ -13,11 +17,11 @@
 #ifdef LICASA_HAVE_FAST_TIFF_PREVIEW
 #include "imaging/fast_tiff_preview.h"
 #endif
-#include "io/external_file_identity.h"
 #ifdef LICASA_EARLY_PROGRESSIVE_JPEG
 #include "imaging/progressive_jpeg_preview.h"
 #endif
 #include <QColorSpace>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDebug>
 #include <QElapsedTimer>
@@ -26,102 +30,18 @@
 #include <QImageReader>
 #include <QMutexLocker>
 #include <QQuickTextureFactory>
-#include <QSet>
 #include <QUrlQuery>
 #include <QWaitCondition>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <mutex>
 #include <utility>
 
 namespace Licasa {
 namespace {
-QSize boundedPreviewSize(const QSize& requestedSize, quint64 maximumPixels);
+using namespace PreviewDecodeSupport;
 
-bool isJpegSuffix(const QString& suffix)
-{
-    return suffix == QStringLiteral("jpg") || suffix == QStringLiteral("jpeg");
-}
-
-bool isTiffSuffix(const QString& suffix)
-{
-    return suffix == QStringLiteral("tif") || suffix == QStringLiteral("tiff");
-}
-
-bool isHeifSuffix(const QString& suffix)
-{
-    return suffix == QStringLiteral("heic") || suffix == QStringLiteral("heif") ||
-           suffix == QStringLiteral("hif");
-}
-
-bool isJp2Suffix(const QString& suffix)
-{
-    return suffix == QStringLiteral("jp2") || suffix == QStringLiteral("j2k") ||
-           suffix == QStringLiteral("j2c") || suffix == QStringLiteral("jpc");
-}
-
-bool hasEmbeddedPreviewCodec(const QString& suffix)
-{
-    return isHeifSuffix(suffix) || suffix == QStringLiteral("jxl");
-}
-
-bool isRawSuffix(const QString& suffix)
-{
-    return suffix == QStringLiteral("dng") || suffix == QStringLiteral("raw") ||
-           suffix == QStringLiteral("cr2") || suffix == QStringLiteral("cr3") ||
-           suffix == QStringLiteral("nef") || suffix == QStringLiteral("nrw") ||
-           suffix == QStringLiteral("arw") || suffix == QStringLiteral("srw") ||
-           suffix == QStringLiteral("rw2") || suffix == QStringLiteral("pef") ||
-           suffix == QStringLiteral("orf") || suffix == QStringLiteral("raf");
-}
-
-struct NearbyFileStamp {
-    QString canonicalPath;
-    qint64 size = -1;
-    QDateTime modified;
-    QDateTime changed;
-    std::optional<ExternalFileIdentity> nativeIdentity;
-
-    bool isValid() const { return size >= 0 && !canonicalPath.isEmpty(); }
-};
-
-NearbyFileStamp nearbyFileStamp(const QString& path)
-{
-    const QFileInfo info(path);
-    if (!info.isFile()) {
-        return {};
-    }
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return {};
-    }
-    return {info.canonicalFilePath(), info.size(), info.lastModified(), info.metadataChangeTime(),
-            externalFileIdentity(file)};
-}
-
-bool sameFileStamp(const NearbyFileStamp& left, const NearbyFileStamp& right)
-{
-    return left.isValid() && right.isValid() && left.canonicalPath == right.canonicalPath &&
-           left.size == right.size && left.modified == right.modified &&
-           left.changed == right.changed && left.nativeIdentity == right.nativeIdentity;
-}
-
-QSize admittedNativeJpegSize(const QSize& source, quint64 maximumPixels)
-{
-    if (!source.isValid() || source.isEmpty()) {
-        return {};
-    }
-    for (const quint64 divider : {quint64(1), quint64(2), quint64(4), quint64(8)}) {
-        const QSize nativeSize(int((quint64(source.width()) + divider - 1) / divider),
-                               int((quint64(source.height()) + divider - 1) / divider));
-        if (ImageDecodeContract::allows(nativeSize, maximumPixels)) {
-            return nativeSize;
-        }
-    }
-    return {};
-}
 } // namespace
 
 struct DecodedImageCache {
@@ -206,402 +126,11 @@ struct DecodedImageCache {
     }
 };
 
-struct NearbyPreviewCache : std::enable_shared_from_this<NearbyPreviewCache> {
-    struct Entry {
-        QImage image;
-        NearbyFileStamp stamp;
-    };
-
-    QMutex mutex;
-    QWaitCondition activeFinished;
-    QStringList desired;
-    QHash<QString, Entry> entries;
-    QSet<QString> attempted;
-    QSize requestedSize;
-    qsizetype byteLimit = 0;
-    qsizetype slotLimit = 0;
-    qsizetype bytes = 0;
-    quint64 hitCount = 0;
-    std::shared_ptr<std::atomic_bool> activeCancellation;
-    QString activePath;
-    bool workerRunning = false;
-
-    void cancelActive()
-    {
-        if (activeCancellation) {
-            activeCancellation->store(true, std::memory_order_relaxed);
-            activeFinished.wakeAll();
-        }
-    }
-
-    void cancelActiveHeavyCodec()
-    {
-        QMutexLocker lock(&mutex);
-        const QString suffix = QFileInfo(activePath).suffix().toLower();
-        if (isHeifSuffix(suffix) || isJp2Suffix(suffix) || suffix == QStringLiteral("avif") ||
-            suffix == QStringLiteral("webp")) {
-            cancelActive();
-        }
-    }
-
-    void clear()
-    {
-        QMutexLocker lock(&mutex);
-        cancelActive();
-        desired.clear();
-        activePath.clear();
-        activeFinished.wakeAll();
-        entries.clear();
-        attempted.clear();
-        bytes = 0;
-    }
-
-    QImage lookup(const QString& path)
-    {
-        QMutexLocker lock(&mutex);
-        auto it = entries.find(path);
-        if (it == entries.end()) {
-            return {};
-        }
-        if (!sameFileStamp(it->stamp, nearbyFileStamp(path))) {
-            bytes -= it->image.sizeInBytes();
-            entries.erase(it);
-            attempted.remove(path);
-            return {};
-        }
-        ++hitCount;
-        return it->image;
-    }
-
-    void waitForActivePng(const QString& path, const std::atomic_bool* selectedCancelled)
-    {
-        QMutexLocker lock(&mutex);
-        if (activePath != path || !activeCancellation ||
-            activeCancellation->load(std::memory_order_relaxed)) {
-            return;
-        }
-        // The preview-only PNG reader may already be halfway through the same
-        // file. Wait on this worker instead of starting a duplicate full read.
-        // The selected request can still fall back if that work stalls.
-        QElapsedTimer timer;
-        timer.start();
-        while (activePath == path && activeCancellation &&
-               !activeCancellation->load(std::memory_order_relaxed) &&
-               !(selectedCancelled && selectedCancelled->load(std::memory_order_relaxed))) {
-            const int remaining = 700 - int(timer.elapsed());
-            if (remaining <= 0) {
-                break;
-            }
-            activeFinished.wait(&mutex, std::min(remaining, 25));
-        }
-    }
-
-    bool setWindow(const QList<QUrl>& urls, const QSize& requested, int memoryMiB)
-    {
-        QStringList paths;
-        paths.reserve(std::min<qsizetype>(urls.size(), 10));
-        for (const QUrl& url : urls) {
-            if (url.isLocalFile() && !paths.contains(url.toLocalFile())) {
-                paths.append(url.toLocalFile());
-            }
-            if (paths.size() == 10) {
-                break;
-            }
-        }
-        const qsizetype limit =
-            std::min<qsizetype>(96, std::max(0, memoryMiB) / 8) * qsizetype(1024 * 1024);
-        // Ten slots at this size cannot retain more than the cache limit.
-        const qsizetype perSlot = limit / 10;
-        QMutexLocker lock(&mutex);
-        if (desired == paths && requestedSize == requested && byteLimit == limit) {
-            return !workerRunning && !paths.isEmpty();
-        }
-        if (!activePath.isEmpty()) {
-            const int activeIndex = paths.indexOf(activePath);
-            if (activeIndex < 0) {
-                cancelActive();
-            } else {
-                // A direction change can move the active decode behind a new
-                // nearest neighbor. Let the worker restart with that neighbor.
-                for (int index = 0; index < activeIndex; ++index) {
-                    if (!entries.contains(paths.at(index))) {
-                        cancelActive();
-                        break;
-                    }
-                }
-            }
-        }
-        desired = std::move(paths);
-        requestedSize = requested;
-        byteLimit = limit;
-        slotLimit = perSlot;
-        attempted.clear();
-        for (auto it = entries.begin(); it != entries.end();) {
-            if (!desired.contains(it.key()) || it->image.sizeInBytes() > slotLimit) {
-                bytes -= it->image.sizeInBytes();
-                it = entries.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        return !workerRunning && !desired.isEmpty();
-    }
-
-    void run(ImageResourcePolicy& policy, QThreadPool& pool)
-    {
-        QString path;
-        QSize target;
-        qsizetype maxBytes = 0;
-        qsizetype cacheBudgetBytes = 0;
-        int priority = -1;
-        auto cancellation = std::make_shared<std::atomic_bool>(false);
-        {
-            QMutexLocker lock(&mutex);
-            for (int index = 0; index < desired.size(); ++index) {
-                const QString& candidate = desired.at(index);
-                if (!entries.contains(candidate) && !attempted.contains(candidate)) {
-                    path = candidate;
-                    priority = index;
-                    break;
-                }
-            }
-            if (path.isEmpty()) {
-                workerRunning = false;
-                activeCancellation.reset();
-                activePath.clear();
-                activeFinished.wakeAll();
-                return;
-            }
-            attempted.insert(path);
-            target = requestedSize;
-            maxBytes = slotLimit;
-            cacheBudgetBytes = byteLimit;
-            activeCancellation = cancellation;
-            activePath = path;
-        }
-
-        QImage decoded;
-        const NearbyFileStamp before = nearbyFileStamp(path);
-        const QString suffix = QFileInfo(path).suffix().toLower();
-        const bool raw = isRawSuffix(suffix);
-        const bool embeddedCodec = hasEmbeddedPreviewCodec(suffix);
-        const bool nativeStillCodec =
-            suffix == QStringLiteral("avif") || suffix == QStringLiteral("webp");
-        const bool prefetchCandidate =
-            isJpegSuffix(suffix) || isJp2Suffix(suffix) || suffix == QStringLiteral("png") ||
-            suffix == QStringLiteral("webp") || suffix == QStringLiteral("bmp") ||
-            isTiffSuffix(suffix) || suffix == QStringLiteral("avif") || embeddedCodec || raw;
-        if (prefetchCandidate && before.isValid() && maxBytes > 0 && target.isValid()) {
-#ifdef LICASA_HAVE_FAST_TIFF_PREVIEW
-            if (isTiffSuffix(suffix)) {
-                decoded = readFastTiffPreview(path, target, policy.maximumImagePixels(), maxBytes,
-                                              cancellation.get());
-            }
-#endif
-            if (decoded.isNull() && !cancellation->load(std::memory_order_relaxed)) {
-                const quint64 maximumPixels =
-                    std::min(policy.maximumImagePixels(), quint64(maxBytes) / 4);
-                // AVIF and WebP decode the native raster before scaling.
-                // Budget ten bytes of transient work per source pixel against
-                // the nearby-cache allowance for only the three closest stills.
-                const quint64 nativeStillPixels =
-                    nativeStillCodec && priority < 3
-                        ? std::min({policy.maximumImagePixels(), quint64(cacheBudgetBytes) / 10,
-                                    quint64(12'000'000)})
-                        : maximumPixels;
-                const bool jp2Nearby = isJp2Suffix(suffix) && priority < 3;
-                QImageReader reader(path);
-                ImageDecodeContract::configure(
-                    reader, jp2Nearby ? policy.maximumImagePixels() : nativeStillPixels,
-                    cancellation.get(), false, false, false);
-                if (jp2Nearby && reader.device()) {
-                    reader.device()->setProperty(
-                        ImageDecodeContract::scaledDecodePixelBudgetProperty,
-                        QVariant::fromValue(maximumPixels));
-                }
-                reader.setAutoTransform(true);
-                if (reader.canRead()) {
-                    const QSize source = reader.size();
-#ifdef LICASA_HAVE_FAST_PNG_PREVIEW
-                    // Decoding a large PNG still consumes CPU for every source
-                    // row. Prepare the closest three, then leave farther files
-                    // to the next browsing window.
-                    if (priority < 3 && suffix == QStringLiteral("png") && source.isValid() &&
-                        !ImageDecodeContract::allows(source, maximumPixels) &&
-                        fastPngBaseEligible(path, policy.maximumImagePixels())) {
-                        QSize scaled = source;
-                        scaled.scale(boundedPreviewSize(target, maximumPixels),
-                                     Qt::KeepAspectRatio);
-                        if (scaled.isValid()) {
-                            decoded =
-                                readFastPngNearbyPreview(path, scaled, policy.maximumImagePixels(),
-                                                         maxBytes, cancellation.get());
-                        }
-                    }
-#endif
-                    const bool jpeg = isJpegSuffix(suffix);
-                    const QSize nativeJpegSize =
-                        jpeg ? admittedNativeJpegSize(source, maximumPixels) : QSize();
-                    const bool nativeJpegScale =
-                        jpeg && nativeJpegSize.isValid() &&
-                        reader.supportsOption(QImageIOHandler::ScaledSize) &&
-                        ImageDecodeContract::allows(source, policy.maximumImagePixels());
-                    const QSize embeddedRawPreview =
-                        raw && reader.device()
-                            ? reader.device()
-                                  ->property(ImageDecodeContract::embeddedPreviewSizeProperty)
-                                  .toSize()
-                            : QSize();
-                    const bool scalableEmbeddedJpeg =
-                        raw && reader.device() &&
-                        reader.device()
-                            ->property(ImageDecodeContract::scalableEmbeddedJpegProperty)
-                            .toBool();
-                    const bool boundedRawPreview =
-                        raw && (ImageDecodeContract::allows(embeddedRawPreview, maximumPixels) ||
-                                scalableEmbeddedJpeg);
-                    const QSize bounded = boundedPreviewSize(target, maximumPixels);
-                    QSize scaled = raw ? embeddedRawPreview : source;
-                    scaled.scale(bounded, Qt::KeepAspectRatio);
-                    const QSize embeddedStillPreview =
-                        embeddedCodec && reader.device()
-                            ? reader.device()
-                                  ->property(ImageDecodeContract::embeddedPreviewSizeProperty)
-                                  .toSize()
-                            : QSize();
-                    const bool animatedEmbeddedCodec = embeddedCodec && reader.supportsAnimation();
-                    const bool animatedNativeStill = nativeStillCodec && reader.supportsAnimation();
-                    const bool boundedNativeStill =
-                        nativeStillCodec && priority < 3 && !animatedNativeStill &&
-                        ImageDecodeContract::allows(source, nativeStillPixels);
-                    const bool boundedJp2 =
-                        jp2Nearby && reader.device() &&
-                        reader.device()
-                            ->property(ImageDecodeContract::boundedJp2ScaleProperty)
-                            .toBool() &&
-                        source.isValid() && scaled.isValid() &&
-                        reader.supportsOption(QImageIOHandler::ScaledSize) &&
-                        ImageDecodeContract::allows(source, policy.maximumImagePixels());
-                    const bool boundedEmbeddedStill =
-                        source.isValid() && scaled.isValid() && embeddedStillPreview.isValid() &&
-                        !animatedEmbeddedCodec &&
-                        ImageDecodeContract::allows(embeddedStillPreview, maximumPixels) &&
-                        embeddedStillPreview.width() >= scaled.width() &&
-                        embeddedStillPreview.height() >= scaled.height() &&
-                        qAbs(qint64(embeddedStillPreview.width()) * source.height() -
-                             qint64(embeddedStillPreview.height()) * source.width()) <=
-                            std::max(source.width(), source.height());
-                    const bool boundedHeifGrid =
-                        embeddedCodec && reader.device() && scaled.isValid() &&
-                        reader.device()
-                            ->property(ImageDecodeContract::boundedGridPreviewProperty)
-                            .toBool();
-#ifdef LICASA_HAVE_FAST_WEBP_PREVIEW
-                    if (decoded.isNull() && suffix == QStringLiteral("webp") &&
-                        boundedNativeStill && scaled.isValid() &&
-                        reader.transformation() == QImageIOHandler::TransformationNone) {
-                        decoded = readFastWebpPreview(path, scaled, nativeStillPixels, maxBytes,
-                                                      cancellation.get());
-                    }
-#endif
-                    // Only a bounded source or a codec-owned native scale may
-                    // run alongside the current full reader.
-                    if (decoded.isNull() && (boundedRawPreview || boundedEmbeddedStill ||
-                                             boundedHeifGrid || boundedNativeStill || boundedJp2 ||
-                                             (!raw && source.isValid() && !animatedEmbeddedCodec &&
-                                              !animatedNativeStill &&
-                                              (ImageDecodeContract::allows(source, maximumPixels) ||
-                                               nativeJpegScale)))) {
-                        if (nativeJpegScale &&
-                            !ImageDecodeContract::allows(source, maximumPixels)) {
-                            scaled.scale(nativeJpegSize, Qt::KeepAspectRatio);
-                        }
-                        if (scaled.isValid() && scaled != (raw ? embeddedRawPreview : source)) {
-                            reader.setScaledSize(scaled);
-                        }
-                        if (!cancellation->load(std::memory_order_relaxed)) {
-                            decoded = reader.read();
-                            if (!ImageDecodeContract::allows(decoded.size(), maximumPixels)) {
-                                decoded = {};
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        const NearbyFileStamp after = nearbyFileStamp(path);
-        bool more = false;
-        {
-            QMutexLocker lock(&mutex);
-            if (activePath == path) {
-                activePath.clear();
-            }
-            if (!cancellation->load(std::memory_order_relaxed) && desired.contains(path) &&
-                !decoded.isNull() && decoded.sizeInBytes() > 0 &&
-                decoded.sizeInBytes() <= slotLimit && sameFileStamp(before, after)) {
-                bytes += decoded.sizeInBytes();
-                entries.insert(path, {std::move(decoded), after});
-            }
-            for (const QString& candidate : desired) {
-                if (!entries.contains(candidate) && !attempted.contains(candidate)) {
-                    more = true;
-                    break;
-                }
-            }
-            if (!more) {
-                workerRunning = false;
-                activeCancellation.reset();
-            }
-            activeFinished.wakeAll();
-        }
-        if (more) {
-            pool.start([self = shared_from_this(), &policy, &pool] { self->run(policy, pool); },
-                       -1);
-        }
-    }
-};
-
-struct ParallelDecodePair {
-    QMutex mutex;
-    QWaitCondition previewFinishedCondition;
-    std::atomic_bool previewPresented = false;
-    int maximumMegapixels = 0;
-    bool fullOwnsGate = false;
-    bool previewBypassedGate = false;
-    bool previewFinished = false;
-};
-
 namespace {
 constexpr qsizetype kMaximumDecodedBaseCacheBytes =
     qsizetype(ImageDecodeContract::maximumDecodedBaseCacheBytes);
 
 bool traceDecodeCache() { return qEnvironmentVariableIsSet("LICASA_TRACE_DECODE_CACHE"); }
-QSize boundedPreviewSize(const QSize& requestedSize, quint64 maximumPixels)
-{
-    if (!requestedSize.isValid() || requestedSize.width() <= 0 || requestedSize.height() <= 0) {
-        return {};
-    }
-    if (ImageDecodeContract::allows(requestedSize, maximumPixels)) {
-        return requestedSize;
-    }
-
-    const long double requestedPixels =
-        static_cast<long double>(requestedSize.width()) * requestedSize.height();
-    const long double scale = std::sqrt(static_cast<long double>(maximumPixels) / requestedPixels);
-    QSize boundedSize(std::max(1, static_cast<int>(std::floor(requestedSize.width() * scale))),
-                      std::max(1, static_cast<int>(std::floor(requestedSize.height() * scale))));
-
-    // Floating-point rounding should already leave the area at or below the
-    // budget. Keep the final adjustment integer-only so that invariant is exact.
-    while (!ImageDecodeContract::allows(boundedSize, maximumPixels)) {
-        if (boundedSize.width() >= boundedSize.height()) {
-            boundedSize.rwidth() -= 1;
-        } else {
-            boundedSize.rheight() -= 1;
-        }
-    }
-    return boundedSize;
-}
 
 bool queryBooleanValue(const QUrlQuery& query, const QString& key, bool defaultValue)
 {
@@ -653,8 +182,7 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                         ImageResourcePolicy& resourcePolicy,
                         std::shared_ptr<DecodedImageCache> decodedImageCache,
                         std::shared_ptr<NearbyPreviewCache> nearbyPreviewCache,
-                        std::shared_ptr<std::atomic_bool> cancelled, bool priorityNavigationPreview,
-                        std::function<void()> discardFailedPreview)
+                        std::shared_ptr<std::atomic_bool> cancelled, bool priorityNavigationPreview)
         : filePath_(std::move(filePath)), requestedSize_(requestedSize),
           editParameters_(std::move(editParameters)), colorManagedRendering_(colorManagedRendering),
           fullDetail_(fullDetail), rawFastDevelopment_(rawFastDevelopment),
@@ -662,8 +190,7 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
           editWarmupRequested_(editWarmupRequested), parallelPreview_(parallelPreview),
           speculativeFull_(speculativeFull), parallelPair_(std::move(parallelPair)),
           resourcePolicy_(resourcePolicy), decodedImageCache_(std::move(decodedImageCache)),
-          nearbyPreviewCache_(std::move(nearbyPreviewCache)),
-          discardFailedPreview_(std::move(discardFailedPreview)), cancelled_(std::move(cancelled)),
+          nearbyPreviewCache_(std::move(nearbyPreviewCache)), cancelled_(std::move(cancelled)),
           priorityNavigationPreview_(priorityNavigationPreview)
     {
         if (traceDecodePhases()) {
@@ -729,12 +256,7 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                                            : resourcePolicy_.prepareForProcessing());
                 }
             }
-            QMutexLocker pairLock(&parallelPair_->mutex);
-            parallelPair_->previewFinished = true;
-            if (isCancelled() || !error_.isEmpty()) {
-                parallelPair_->previewPresented.store(true, std::memory_order_release);
-            }
-            parallelPair_->previewFinishedCondition.wakeAll();
+            parallelPair_->finishPreview(isCancelled() || !error_.isEmpty());
         } else if (priorityPreviewReady) {
             // A bounded selected preview can be shown while the cancelled old
             // full reader is still retiring from LibRaw.
@@ -766,10 +288,6 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
         // completion: a consumer may start the next heavy operation immediately.
         const bool prewarm = prewarmAfterRawDecode_ && !isCancelled() &&
                              !qEnvironmentVariableIsSet("LICASA_DISABLE_RAW_EDIT_PREWARM");
-        if (discardFailedPreview_ && (isCancelled() || !error_.isEmpty())) {
-            parallelPair_->previewPresented.store(true, std::memory_order_release);
-            discardFailedPreview_();
-        }
         if (tracing) {
             const auto finishedAt = Clock::now();
             const auto milliseconds = [](Clock::duration duration) {
@@ -979,6 +497,18 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                 return;
             }
 
+            if (!fullDetail_ && !parallelPreview_ && !rawFastDevelopment_ &&
+                !rawInteractiveDevelopment_ &&
+                (suffix == QStringLiteral("ppm") || suffix == QStringLiteral("pnm")) &&
+                reader.format() == QByteArrayLiteral("ppm") && reader.scaledSize().isValid() &&
+                reader.transformation() == QImageIOHandler::TransformationNone) {
+                image = readFastPnmPreview(filePath_, reader.scaledSize(), maximumPixels,
+                                           8 * 1024 * 1024, cancelled_.get());
+                if (isCancelled()) {
+                    return;
+                }
+            }
+
 #ifdef LICASA_HAVE_FAST_WEBP_PREVIEW
             const bool onePassWebpBase =
                 suffix == QStringLiteral("webp") && reader.size().isValid() &&
@@ -1062,7 +592,8 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
                     }
                     image = fullBase.scaled(previewSize, Qt::IgnoreAspectRatio,
                                             Qt::SmoothTransformation);
-                    if (!image.isNull() && fullBase.size() == sourceSize &&
+                    if (!image.isNull() && !isCancelled() && fullBase.size() == sourceSize &&
+                        fullBase.sizeInBytes() > 0 &&
                         fullBase.sizeInBytes() <= kMaximumDecodedBaseCacheBytes) {
                         const bool stored = decodedImageCache_->store(
                             fileInfo, QSize(), maximumMegapixels, true, false, fullBase);
@@ -1238,7 +769,6 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
     ImageResourcePolicy& resourcePolicy_;
     std::shared_ptr<DecodedImageCache> decodedImageCache_;
     std::shared_ptr<NearbyPreviewCache> nearbyPreviewCache_;
-    std::function<void()> discardFailedPreview_;
     QImage image_;
     QString error_;
     std::shared_ptr<std::atomic_bool> cancelled_;
@@ -1250,7 +780,8 @@ class AsyncDecodeResponse final : public QQuickImageResponse, public QRunnable {
 
 AsyncImageProvider::AsyncImageProvider(ImageResourcePolicy& resourcePolicy)
     : resourcePolicy_(resourcePolicy), decodedImageCache_(std::make_shared<DecodedImageCache>()),
-      nearbyPreviewCache_(std::make_shared<NearbyPreviewCache>())
+      nearbyPreviewCache_(std::make_shared<NearbyPreviewCache>()),
+      pendingPairs_(std::make_unique<ParallelDecodePairRegistry>())
 {
     // Ordinary edits/animation work remain serial. Only an explicitly paired
     // bounded preview and admitted full read may overlap.
@@ -1298,6 +829,7 @@ void AsyncImageProvider::releasePictureResources(bool retainNearbyPreviews, cons
             }
         }
         activeRequests_.clear();
+        pendingPairs_->clear();
         nextNavigationPreview_ = retainNearbyPreviews;
         nextNavigationPath_ =
             retainNearbyPreviews && nextImage.isLocalFile() ? nextImage.toLocalFile() : QString();
@@ -1310,10 +842,6 @@ void AsyncImageProvider::releasePictureResources(bool retainNearbyPreviews, cons
         // A selected image has priority over expensive nearby codec work.
         // The completed nearby entries remain available for this navigation.
         nearbyPreviewCache_->cancelActiveHeavyCodec();
-    }
-    {
-        QMutexLocker pairLock(&pairsMutex_);
-        pendingPairs_.clear();
     }
     // Decode-cache ownership lives on this serial pool. Release both its CPU
     // raster and GPU staging buffers after earlier image work has finished.
@@ -1328,33 +856,20 @@ void AsyncImageProvider::prepareNearbyPreviews(const QList<QUrl>& urls, const QS
                                                int maximumImageMemoryMiB)
 {
     if (nearbyPreviewCache_->setWindow(urls, requestedSize, maximumImageMemoryMiB)) {
-        {
-            QMutexLocker lock(&nearbyPreviewCache_->mutex);
-            nearbyPreviewCache_->workerRunning = true;
-        }
         nearbyPreviewPool_.start([cache = nearbyPreviewCache_,
                                   this] { cache->run(resourcePolicy_, nearbyPreviewPool_); },
                                  -1);
     }
 }
 
-qsizetype AsyncImageProvider::nearbyPreviewCount() const
-{
-    QMutexLocker lock(&nearbyPreviewCache_->mutex);
-    return nearbyPreviewCache_->entries.size();
-}
+qsizetype AsyncImageProvider::nearbyPreviewCount() const { return nearbyPreviewCache_->count(); }
 
 qsizetype AsyncImageProvider::nearbyPreviewBytes() const
 {
-    QMutexLocker lock(&nearbyPreviewCache_->mutex);
-    return nearbyPreviewCache_->bytes;
+    return nearbyPreviewCache_->retainedBytes();
 }
 
-quint64 AsyncImageProvider::nearbyPreviewHitCount() const
-{
-    QMutexLocker lock(&nearbyPreviewCache_->mutex);
-    return nearbyPreviewCache_->hitCount;
-}
+quint64 AsyncImageProvider::nearbyPreviewHitCount() const { return nearbyPreviewCache_->hits(); }
 
 quint64 AsyncImageProvider::decodedBaseCacheHitCount() const
 {
@@ -1376,14 +891,7 @@ bool AsyncImageProvider::hasNearbyPreview(const QUrl& url) const
 
 void AsyncImageProvider::markParallelPreviewPresented(const QString& pairId)
 {
-    std::shared_ptr<ParallelDecodePair> pair;
-    {
-        QMutexLocker pairLock(&pairsMutex_);
-        pair = pendingPairs_.take(pairId);
-    }
-    if (pair) {
-        pair->previewPresented.store(true, std::memory_order_release);
-    }
+    pendingPairs_->markPresented(pairId);
 }
 
 QQuickImageResponse* AsyncImageProvider::requestImageResponse(const QString& id,
@@ -1418,34 +926,31 @@ QQuickImageResponse* AsyncImageProvider::requestImageResponse(const QString& id,
     const bool speculativeFull = parallelStage == QStringLiteral("full") && fullDetail;
     const QString pairId = query.queryItemValue(QStringLiteral("licasa_pair"));
     std::shared_ptr<ParallelDecodePair> pair;
+    QByteArray pairFingerprint;
     if (!pairId.isEmpty() && (parallelPreview || speculativeFull)) {
-        QMutexLocker pairLock(&pairsMutex_);
-        if (speculativeFull) {
-            pair = std::make_shared<ParallelDecodePair>();
-            pendingPairs_.insert(pairId, pair);
-        } else {
-            pair = pendingPairs_.value(pairId);
+        QUrlQuery commonQuery(query);
+        for (const auto* key :
+             {"licasa_stage", "licasa_width", "licasa_height", "licasa_parallel", "licasa_pair"}) {
+            commonQuery.removeAllQueryItems(QString::fromLatin1(key));
         }
+        pairFingerprint = QCryptographicHash::hash(
+            payload.toUtf8() + '\n' + commonQuery.query(QUrl::FullyEncoded).toUtf8(),
+            QCryptographicHash::Sha256);
     }
     bool warmupOk = false;
     const int editWarmupRevision = query.queryItemValue(QStringLiteral("ew")).toInt(&warmupOk);
     const bool editWarmupRequested = warmupOk && editWarmupRevision > 0;
-    std::function<void()> discardFailedPreview;
-    if (parallelPreview && pair) {
-        // A failed or cancelled preview never reaches the frame-swapped signal.
-        // Remove its registry entry so repeated attempts cannot retain pairs.
-        // The provider drains both worker pools before its members are destroyed.
-        discardFailedPreview = [this, pairId, pair] {
-            QMutexLocker pairLock(&pairsMutex_);
-            if (pendingPairs_.value(pairId) == pair) {
-                pendingPairs_.remove(pairId);
-            }
-        };
-    }
     auto cancelled = std::make_shared<std::atomic_bool>(false);
     bool navigationPriority = false;
     {
         QMutexLocker requestsLock(&requestsMutex_);
+        // Pair ownership and cancellation admission share the resource-scope
+        // boundary. Release cannot clear a new pair but miss its request flag.
+        if (!pairFingerprint.isEmpty()) {
+            pair = pendingPairs_->claim(pairId, pairFingerprint,
+                                        parallelPreview ? ParallelDecodePairRegistry::Role::Preview
+                                                        : ParallelDecodePairRegistry::Role::Full);
+        }
         activeRequests_.erase(std::remove_if(activeRequests_.begin(), activeRequests_.end(),
                                              [](const auto& request) { return request.expired(); }),
                               activeRequests_.end());
@@ -1454,7 +959,7 @@ QQuickImageResponse* AsyncImageProvider::requestImageResponse(const QString& id,
         if (!fullDetail && nextNavigationPreview_ && selectedImage) {
             navigationPriority = true;
             nextNavigationPreview_ = false;
-        } else if (fullDetail && !speculativeFull && selectedImage) {
+        } else if (fullDetail && !(speculativeFull && pair) && selectedImage) {
             // A direct full request is the selected image. Do not save the
             // one-shot preview slot for an unrelated later edit request.
             nextNavigationPreview_ = false;
@@ -1464,8 +969,7 @@ QQuickImageResponse* AsyncImageProvider::requestImageResponse(const QString& id,
         filePath, requestedSize, editParametersFromQuery(query), colorManagedRendering, fullDetail,
         rawFastDevelopment, rawInteractiveDevelopment, editWarmupRequested,
         parallelPreview && bool(pair), speculativeFull && bool(pair), pair, resourcePolicy_,
-        decodedImageCache_, nearbyPreviewCache_, std::move(cancelled), navigationPriority,
-        std::move(discardFailedPreview));
+        decodedImageCache_, nearbyPreviewCache_, std::move(cancelled), navigationPriority);
     if (speculativeFull && pair) {
         speculativeFullPool_.start(response);
     } else if (navigationPriority) {

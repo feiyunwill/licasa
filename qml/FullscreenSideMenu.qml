@@ -23,6 +23,7 @@ Item {
     property var backgroundModeManager: null
     property string appVersion: ""
     property string releaseDate: ""
+    property bool installedAsSnap: false
 
     property real fullscreenBackgroundOpacity: 0.70
     property bool transparencyCheckerboardEnabled: false
@@ -64,6 +65,7 @@ Item {
     signal colorManagedRenderingChanged(bool enabled)
     signal maximumImageMemoryMiBRequested(int value)
     signal cropShieldOpacityRequested(real value)
+    signal quitRequested()
 
     readonly property int panelMotionDuration: smoothMotionEnabled ? 220 : 0
     readonly property int scrimMotionDuration: smoothMotionEnabled ? 180 : 0
@@ -320,7 +322,9 @@ Item {
                             && root.backgroundModeManager.supported
                         width: parent.width
                         title: "Background process"
-                        subtitle: "Stay ready after closing and start at your next login"
+                        subtitle: root.installedAsSnap
+                            ? "Stay ready for one minute after closing, then allow Snap updates. Start at your next login."
+                            : "Stay ready after closing and start at your next login"
                         checked: root.backgroundModeManager
                             ? root.backgroundModeManager.enabled : false
                         buttonMotionDuration: root.buttonMotionDuration
@@ -594,6 +598,23 @@ Item {
                             text: "Released " + root.releaseDate
                             color: "#B3FFFFFF"
                             font.pixelSize: 12
+                        }
+
+                        Text {
+                            width: parent.width
+                            visible: root.installedAsSnap
+                            text: "Fully quitting Licasa allows Snap updates. Open pictures and unsaved changes are kept until you finish them."
+                            color: "#B3FFFFFF"
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
+                        }
+
+                        ActionChip {
+                            objectName: "quitLicasaButton"
+                            text: "Quit Licasa"
+                            animationDuration: root.buttonMotionDuration
+                            Accessible.description: "Exit Licasa completely after saving your work. Shortcut Control Shift Q."
+                            onClicked: root.quitRequested()
                         }
                     }
                 }

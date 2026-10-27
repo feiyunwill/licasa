@@ -47,6 +47,7 @@ class AppImagePackagingTests(unittest.TestCase):
                      "wayland-shell-integration/libxdg-shell.so"):
             self.write(self.plugins / name)
         self.payload = self.work / "payload"
+        self.write(self.payload / "usr/libexec/licasa/lifecycle_update.py", b"# lifecycle fixture\n")
         for name in ("usr/bin/licasa", "usr/share/applications/licasa.desktop",
                      "usr/share/icons/hicolor/512x512/apps/licasa.png",
                      "usr/lib/licasa/lib/libQt6Quick.so.6", "usr/lib/licasa/lib/libdav1d.so.7",
@@ -86,6 +87,7 @@ class AppImagePackagingTests(unittest.TestCase):
             appdir = Path(command[command.index("--appdir") + 1])
             self.write(appdir / "apprun-hooks/linuxdeploy-plugin-qt-hook.sh",
                        b"export QT_QPA_PLATFORMTHEME=gtk3\n")
+            self.write(appdir / "AppRun", b'#!/bin/bash\nexec "$this_dir/AppRun.wrapped" "$@"\n')
             self.assertEqual(Path(command[command.index("--deploy-deps-only") + 1]),
                              appdir / "usr/plugins" / packager.GTK_PLATFORM_THEME)
             for library in ("libgtk-3.so.0", "libgdk-3.so.0", "libpangoft2-1.0.so.0"):
@@ -112,6 +114,8 @@ class AppImagePackagingTests(unittest.TestCase):
                         shutil.copy2(source, appdir / "usr/lib" / source.name)
         elif name == "appimagetool-x86_64.AppImage":
             appdir = Path(command[-2])
+            self.assertIn("--family appimage", (appdir / "AppRun").read_text())
+            self.assertIn("AppRun.wrapped", (appdir / "AppRun.lifecycle-original").read_text())
             self.assertNotIn("QT_QPA_PLATFORMTHEME=", (appdir / "apprun-hooks/linuxdeploy-plugin-qt-hook.sh").read_text())
             self.assertIn('GIO_MODULE_DIR="$this_dir/usr/lib/licasa/gio/modules"',
                           (appdir / "apprun-hooks/linuxdeploy-plugin-qt-hook.sh").read_text())
@@ -166,6 +170,23 @@ class AppImagePackagingTests(unittest.TestCase):
         image = self.output / "Licasa-0.7.1-x86_64.AppImage"
         digest = hashlib.sha256(image.read_bytes()).hexdigest()
         self.assertEqual(image.with_name(image.name + ".sha256").read_text(), f"{digest}  {image.name}\n")
+
+    def test_native_debian_launcher_is_normalized_before_portable_assembly(self):
+        self.write(self.payload / "usr/bin/licasa.bin", b"native actual ELF fixture")
+        self.write(self.payload / "usr/bin/licasa", b"native root-gated wrapper")
+        self.write(self.payload / "usr/lib/licasa/native_lifecycle.py", b"native only")
+        self.write(self.payload / "usr/share/licasa/native-runtime.json", b"native only")
+        original = self.run_tool
+        def inspect(command, **kwargs):
+            if Path(command[0]).name == "linuxdeploy-x86_64.AppImage":
+                appdir = Path(command[command.index("--appdir") + 1])
+                self.assertEqual((appdir / "usr/bin/licasa").read_bytes(), b"native actual ELF fixture")
+                self.assertFalse((appdir / "usr/bin/licasa.bin").exists())
+                self.assertFalse((appdir / "usr/lib/licasa/native_lifecycle.py").exists())
+                self.assertFalse((appdir / "usr/share/licasa/native-runtime.json").exists())
+            return original(command, **kwargs)
+        with patch.object(self, "run_tool", side_effect=inspect):
+            self.assemble()
 
     def test_missing_system_library_stops_before_deployment(self):
         (self.libraries / "libfribidi.so.0").unlink()

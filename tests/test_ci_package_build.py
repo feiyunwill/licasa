@@ -2,6 +2,8 @@
 """Keep PR package builds on canonical recipes with isolated, profile-exact caches."""
 
 from pathlib import Path
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -53,6 +55,32 @@ class CiPackageBuildTests(unittest.TestCase):
         with patch("check_package_report.validate_report") as strict:
             check_report(report, {"id": "candidate"}, {}, package)
             strict.assert_called_once_with(report, {"id": "candidate"}, {})
+
+    def test_desktop_test_runner_uses_real_user_credentials_and_preserves_arguments(self):
+        probe = '''import os, pathlib, sys
+assert os.getuid() == os.geteuid() != 0
+assert 0 not in os.getgroups()
+assert sys.argv[1] == "argument with spaces"
+if sys.argv[2] == "root-parent":
+    home = pathlib.Path(os.environ["HOME"])
+    assert home == pathlib.Path.cwd()
+    assert home.stat().st_uid == os.geteuid()
+    assert home.stat().st_mode & 0o777 == 0o700
+    assert os.getgroups() == []
+    assert pathlib.Path(os.environ["XDG_RUNTIME_DIR"]).stat().st_uid == os.geteuid()
+print("credentials verified")
+'''
+        completed = subprocess.run([sys.executable, str(ROOT / "tests/run_unprivileged.py"),
+                                    "-c", probe, "argument with spaces",
+                                    "root-parent" if os.geteuid() == 0 else "user-parent"],
+                                   capture_output=True, text=True, timeout=10)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("credentials verified", completed.stdout)
+
+    def test_desktop_test_runner_propagates_failure(self):
+        completed = subprocess.run([sys.executable, str(ROOT / "tests/run_unprivileged.py"),
+                                    "-c", "raise SystemExit(23)"], timeout=10)
+        self.assertEqual(completed.returncode, 23)
 
 
 if __name__ == "__main__":

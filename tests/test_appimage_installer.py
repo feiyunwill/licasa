@@ -4,9 +4,11 @@
 import os
 import fcntl
 import hashlib
+import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -15,10 +17,14 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "packaging/install-licasa-appimage.sh"
 BASH = shutil.which("bash")
+sys.path.insert(0, str(ROOT / "tools"))
+from lifecycle_update import InstallationGate, recover_appimage, start_identity
 
 
 class AppImageInstallerTests(unittest.TestCase):
     def setUp(self):
+        old_umask = os.umask(0o022)
+        self.addCleanup(os.umask, old_umask)
         self.temporary = tempfile.TemporaryDirectory(prefix="licasa-installer-test-")
         self.addCleanup(self.temporary.cleanup)
         self.work = Path(self.temporary.name)
@@ -108,7 +114,7 @@ printf 'fixture icon' > squashfs-root/usr/share/icons/hicolor/512x512/apps/licas
         for path, contents in paths.items():
             self.assertEqual(path.read_text(), contents)
         self.assertFalse([path for path in (self.user_home / ".local/opt").glob(".licasa-*")
-                          if path.name != ".licasa-appimage.lock"])
+                          if path.name not in {".licasa-appimage.lock", ".licasa-appimage.licasa-lifecycle"}])
 
     def fail_rename(self, destination, after=False, signal=False):
         real_mv = shutil.which("mv")
@@ -153,6 +159,29 @@ exec "{real_mv}" "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assert_preserved(paths)
 
+    def test_killed_update_recovers_runtime_icon_and_desktop_from_durable_journal(self):
+        for boundary in ("*/opt/licasa-appimage", "*/apps/licasa-appimage.png"):
+            with self.subTest(boundary=boundary):
+                paths = self.existing_installation()
+                real_mv = shutil.which("mv")
+                self.write_tool("mv", f'''"{real_mv}" "$@"
+if [[ "${{@: -1}}" == {boundary} && ! -e "$TMPDIR/kill-fired" ]]; then
+  touch "$TMPDIR/kill-fired"
+  kill -KILL "$PPID"
+fi
+''')
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                target = self.user_home / ".local/opt/licasa-appimage"
+                with InstallationGate(target) as gate:
+                    self.assertEqual(gate.read()["state"], "replacing")
+                    recover_appimage(gate)
+                    self.assertEqual(gate.read()["state"], "verified")
+                self.assert_preserved(paths)
+                (self.tools / "mv").unlink()
+                (self.work / "kill-fired").unlink()
+                shutil.rmtree(self.user_home)
+
     def test_concurrent_install_is_rejected_without_mutating_existing_files(self):
         paths = self.existing_installation()
         lock = self.user_home / ".local/opt/.licasa-appimage.lock"
@@ -176,7 +205,7 @@ exec "{real_mv}" "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Recovery files are preserved", result.stderr)
         recovery = list((self.user_home / ".local/opt").glob(".licasa-appimage.*"))
-        recovery = [path for path in recovery if path.is_dir()]
+        recovery = [path for path in recovery if path.is_dir() and path.name != ".licasa-appimage.licasa-lifecycle"]
         self.assertEqual(len(recovery), 1)
         self.assertEqual((recovery[0] / "integration-1").read_text(), "existing icon")
         self.assertEqual((self.user_home / ".local/opt/licasa-appimage/AppRun").read_text(),
@@ -198,12 +227,17 @@ exec "{real_mv}" "$@"
         startup = config / "autostart/licasa-background.desktop"
         startup.parent.mkdir()
         startup.write_text(f'[Desktop Entry]\nExec="{target}/AppRun" --background\nX-Licasa-Background=1\n')
+        identity = hashlib.sha256(f"{os.geteuid()}\nappimage\n{target}".encode()).hexdigest()[:32]
+        scoped = startup.with_name(f"licasa-background-{identity}.desktop")
+        scoped.write_text(f'[Desktop Entry]\nExec=/usr/bin/env "{target}/AppRun" --background\n'
+                          f'X-Licasa-Background=1\nX-Licasa-Installation={identity}\n')
         result = self.run_installer(uninstall=True, installed_script=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(target.exists())
         self.assertFalse((data / "applications/licasa-appimage.desktop").exists())
         self.assertFalse((data / "icons/hicolor/512x512/apps/licasa-appimage.png").exists())
         self.assertFalse(startup.exists())
+        self.assertFalse(scoped.exists())
         self.assertEqual(settings.read_text(), "user settings")
         self.assertEqual(photo.read_bytes(), b"photo")
         self.assertEqual(unrelated.read_text(), "another application")
@@ -251,7 +285,8 @@ exec "{real_mv}" "$@"
         self.assertEqual(self.run_installer().returncode, 0)
         target = self.user_home / ".local/opt/licasa-appimage"
         paths = {path: path.read_bytes() for path in self.user_home.rglob("*")
-                 if path.is_file() and ".local/state" not in str(path.relative_to(self.user_home))}
+                 if path.is_file() and ".local/state" not in str(path.relative_to(self.user_home))
+                 and ".licasa-lifecycle" not in str(path)}
         self.fail_rename('*/previous-app')
         result = self.run_installer(uninstall=True)
         self.assertNotEqual(result.returncode, 0)
@@ -271,6 +306,111 @@ exec "{real_mv}" "$@"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(target.exists())
         self.assertFalse((data / "applications/licasa-appimage.desktop").exists())
+
+    def test_standalone_remover_requires_full_quit_for_pre_helper_runtime(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        target = self.user_home / ".local/opt/licasa-appimage"
+        shutil.rmtree(target / "usr/libexec")
+        shutil.rmtree(target.parent / ".licasa-appimage.licasa-lifecycle")
+        shutil.copy2("/bin/sleep", target / "usr/bin/licasa")
+        download = self.work / "download"
+        download.mkdir()
+        standalone = download / "install-licasa-appimage.sh"
+        shutil.copy2(INSTALLER, standalone)
+        photo = self.user_home / "photo.jpg"
+        photo.write_bytes(b"precious")
+        foreign = self.user_home / ".config/autostart/foreign.desktop"
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_text("foreign startup")
+        paths = {path: path.read_bytes() for path in self.user_home.rglob("*")
+                 if path.is_file() and ".local/state" not in str(path)}
+        process = subprocess.Popen([str(target / "usr/bin/licasa"), "60"])
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        completed = subprocess.run([BASH, str(standalone), "--uninstall"], env=self.environment,
+                                   capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("fully Quit", completed.stderr)
+        self.assertIsNone(process.poll())
+        for path, content in paths.items():
+            self.assertEqual(path.read_bytes(), content)
+        process.terminate()
+        process.wait(timeout=5)
+        completed = subprocess.run([BASH, str(standalone), "--uninstall"], env=self.environment,
+                                   capture_output=True, text=True, timeout=10)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Legacy removal", completed.stdout)
+        self.assertFalse(target.exists())
+        self.assertEqual(photo.read_bytes(), b"precious")
+        self.assertEqual(foreign.read_text(), "foreign startup")
+
+    def test_standalone_scoped_unknown_process_and_strict_option(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        target = self.user_home / ".local/opt/licasa-appimage"
+        shutil.rmtree(target / "usr/libexec")
+        download = self.work / "download"
+        download.mkdir()
+        standalone = download / "install-licasa-appimage.sh"
+        shutil.copy2(INSTALLER, standalone)
+        before = (target / "usr/bin/licasa").read_bytes()
+        runtime = self.work / "runtime"
+        runtime.mkdir(mode=0o700)
+        self.environment["XDG_RUNTIME_DIR"] = str(runtime)
+        identity = hashlib.sha256(f"{os.geteuid()}\nappimage\n{target}".encode()).hexdigest()[:32]
+        endpoint = runtime / f"licasa-lc-{identity}.sock"
+        code = '''import ctypes, os, socket, sys, time
+server=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(sys.argv[1]); os.chmod(sys.argv[1], 0o600); server.listen(8)
+libc = ctypes.CDLL(None)
+assert libc.prctl(15, b"unrelated-name", 0, 0, 0) == 0
+assert libc.prctl(4, 0, 0, 0, 0) == 0
+print("ready", flush=True)
+time.sleep(60)
+'''
+        process = subprocess.Popen([sys.executable, "-c", code, str(endpoint)], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            try:
+                os.readlink(f"/proc/{process.pid}/exe")
+            except PermissionError:
+                pass
+            else:
+                self.skipTest("This test requires an unprivileged process without ptrace override")
+            completed = subprocess.run([BASH, str(standalone), "--uninstall"],
+                                       env=dict(self.environment, LICASA_STRICT_PROCESS_INSPECTION="1"),
+                                       capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Process inspection is unavailable", completed.stderr)
+            self.assertEqual((target / "usr/bin/licasa").read_bytes(), before)
+            self.assertIsNone(process.poll())
+            completed = subprocess.run([BASH, str(standalone), "--uninstall"], env=self.environment,
+                                       capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("fully Quit", completed.stderr)
+            self.assertEqual((target / "usr/bin/licasa").read_bytes(), before)
+            endpoint.unlink()
+            journal = target.parent / ".licasa-appimage.licasa-lifecycle/transaction.json"
+            record = json.loads(journal.read_text())
+            record["predecessors"] = {str(process.pid): start_identity(process.pid)}
+            journal.write_text(json.dumps(record))
+            completed = subprocess.run([BASH, str(standalone), "--uninstall"], env=self.environment,
+                                       capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("fully Quit", completed.stderr)
+            self.assertEqual((target / "usr/bin/licasa").read_bytes(), before)
+            record["predecessors"] = {}
+            journal.write_text(json.dumps(record))
+            completed = subprocess.run([BASH, str(standalone), "--uninstall"], env=self.environment,
+                                       capture_output=True, text=True, timeout=10)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn('"inspectionScope": "installation"', completed.stderr)
+            self.assertIn('"globalAbsenceProven": false', completed.stderr)
+            self.assertIn('"legacyFirstQuitRequired": true', completed.stderr)
+            self.assertFalse(target.exists())
+            self.assertIsNone(process.poll())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+            process.stdout.close()
 
     def test_real_desktop_parser_launches_from_special_path_with_exact_photo_argument(self):
         python = "/usr/bin/python3"

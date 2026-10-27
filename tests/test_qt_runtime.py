@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Reject incomplete or mismatched runtime imports before creating a package."""
 
-import importlib.util
 from pathlib import Path
 import re
 import shutil

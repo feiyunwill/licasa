@@ -352,6 +352,33 @@ endif()
 
 # Shared production services: compile once per configuration for the viewer,
 # diagnostics and integration tests. These sources have no per-consumer defines.
+# A working-source receipt complements the exact executable generation hash.
+# Include package and test inputs; documentation and build caches are separate.
+file(GLOB_RECURSE LICASA_RECEIPT_INPUTS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+        src/* qml/* cmake/* packaging/* snap/* tools/* tests/* .github/*)
+list(APPEND LICASA_RECEIPT_INPUTS CMakeLists.txt CMakePresets.json)
+list(SORT LICASA_RECEIPT_INPUTS)
+set(LICASA_RECEIPT_CONTENT "")
+foreach(input IN LISTS LICASA_RECEIPT_INPUTS)
+    if(NOT input MATCHES "(__pycache__|\\.pyc$)" AND NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${input}")
+        file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${input}" input_hash)
+        string(APPEND LICASA_RECEIPT_CONTENT "${input}:${input_hash}\n")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${input}")
+    endif()
+endforeach()
+string(SHA256 LICASA_SOURCE_RECEIPT "${LICASA_RECEIPT_CONTENT}")
+add_library(licasa_lifecycle_platform STATIC
+        src/platform/application_identity.cpp src/platform/application_identity.h
+        src/platform/lifecycle_control.cpp src/platform/lifecycle_control.h
+        src/platform/lifecycle_launch_gate.cpp src/platform/lifecycle_launch_gate.h
+        src/platform/single_instance_endpoint.cpp src/platform/single_instance_endpoint.h)
+target_include_directories(licasa_lifecycle_platform PUBLIC src)
+target_link_libraries(licasa_lifecycle_platform PUBLIC Qt6::Core Qt6::Network)
+target_compile_definitions(licasa_lifecycle_platform PRIVATE
+        "LICASA_SOURCE_RECEIPT=\"${LICASA_SOURCE_RECEIPT}\"")
+licasa_enable_warnings(licasa_lifecycle_platform)
+install(PROGRAMS tools/lifecycle_update.py DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/licasa")
+
 add_library(licasa_image_services STATIC
         src/app/application_settings.cpp
         src/app/application_settings.h
@@ -372,10 +399,15 @@ add_library(licasa_image_services STATIC
         src/export/image_save_service.h
         src/imaging/async_image_provider.cpp
         src/imaging/async_image_provider.h
+        src/imaging/nearby_preview_cache.cpp
+        src/imaging/nearby_preview_cache.h
+        src/imaging/preview_decode_support.h
+        src/imaging/fast_pnm_preview.cpp
+        src/imaging/fast_pnm_preview.h
         src/imaging/image_processing.cpp
         src/imaging/image_processing.h)
 target_include_directories(licasa_image_services PUBLIC src)
-target_link_libraries(licasa_image_services PUBLIC Qt6::Quick)
+target_link_libraries(licasa_image_services PUBLIC Qt6::Quick licasa_lifecycle_platform)
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(LICASA_WEBP QUIET IMPORTED_TARGET libwebp)
@@ -464,6 +496,8 @@ endif()
 
 # Main application executable target.
 set(LICASA_APPLICATION_SOURCES
+        src/app/application_lifecycle.cpp
+        src/app/application_lifecycle.h
         src/app/app_constants.h
         src/media/android_motion_photo.cpp
         src/media/android_motion_photo.h
@@ -501,8 +535,6 @@ set(LICASA_APPLICATION_SOURCES
         src/media/preferred_cover_frame_store.h
         src/platform/single_instance.cpp
         src/platform/single_instance.h
-        src/platform/single_instance_endpoint.cpp
-        src/platform/single_instance_endpoint.h
         src/app/window_manager.cpp
         src/app/window_manager.h
         src/app/window_media_state.cpp

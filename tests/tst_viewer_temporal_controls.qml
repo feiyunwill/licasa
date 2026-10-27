@@ -238,6 +238,25 @@ Item {
             compare(motion.toggles, 1)
         }
 
+        function test_animationTransportHonorsBusyState() {
+            const animation = createTemporaryObject(animationComponent, testCase)
+            const control = createControl(null, animation, true)
+            control.interactionEnabled = false
+            control.togglePlaybackRequested()
+            control.seekRequested(0.75)
+            control.stepRequested(1)
+            compare(animation.playing, false)
+            compare(animation.lastSeek, -1)
+
+            control.interactionEnabled = true
+            control.togglePlaybackRequested()
+            compare(animation.playing, true)
+            control.seekRequested(0.75)
+            compare(animation.lastSeek, 3)
+            control.stepRequested(-1)
+            compare(animation.lastSeek, 1)
+        }
+
         function test_coverFrameIntentStaysAtCapabilityIntentBoundary() {
             const motion = createTemporaryObject(motionComponent, testCase)
             const cover = createTemporaryObject(

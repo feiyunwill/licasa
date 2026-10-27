@@ -8,6 +8,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTimer>
+#include <QUrlQuery>
 
 namespace LicasaDiagnostics {
 namespace {
@@ -65,8 +66,7 @@ class ViewerMeasurement final : public QObject, public DiagnosticCheck {
         if (!result_.contains("preview_ready_ms")) {
             result_["preview_ready_ms"] = elapsed();
         }
-        if (!warming_ && !result_.contains("full_detail_ready_ms") &&
-            !window_->property("previewPhase").toBool()) {
+        if (!warming_ && !result_.contains("full_detail_ready_ms") && fullDetailReady()) {
             result_["full_detail_ready_ms"] = elapsed();
         }
     }
@@ -105,14 +105,9 @@ class ViewerMeasurement final : public QObject, public DiagnosticCheck {
             return;
         }
         if (!imageUrl_.isEmpty() && result_.contains("full_detail_ready_ms") &&
-            !result_.contains("full_detail_presented_ms") &&
-            !window_->property("previewPhase").toBool() &&
+            !result_.contains("full_detail_presented_ms") && fullDetailReady() &&
             viewport_->property("pendingImageSlot").toInt() < 0) {
-            const QString key = viewport_->property("activeRequestKey").toString();
-            if (key.contains(QStringLiteral("licasa_stage=full")) ||
-                key.contains(QStringLiteral("licasa_stage=raw-interactive"))) {
-                result_["full_detail_presented_ms"] = elapsed();
-            }
+            result_["full_detail_presented_ms"] = elapsed();
         }
         if (settling_) {
             return;
@@ -184,6 +179,23 @@ class ViewerMeasurement final : public QObject, public DiagnosticCheck {
     }
 
   private:
+    bool fullDetailReady() const
+    {
+        if (window_->property("previewPhase").toBool() ||
+            window_->property("rawFastPhase").toBool()) {
+            return false;
+        }
+        const QUrl source(viewport_->property("activeRequestKey").toString());
+        if (source.isEmpty()) {
+            return false;
+        }
+        const QString stage = QUrlQuery(source).queryItemValue(QStringLiteral("licasa_stage"));
+        // Unstaged sources have no separate bounded/full handoff, as on the
+        // ordinary animation path. A staged raster must identify final detail.
+        return stage.isEmpty() || stage == QStringLiteral("full") ||
+               stage == QStringLiteral("raw-interactive");
+    }
+
     double elapsed() const { return (monotonicNs() - started_) / 1e6; }
     qint64 started_;
     qint64 warmStarted_ = 0;
