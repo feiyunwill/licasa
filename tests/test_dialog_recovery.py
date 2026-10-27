@@ -2,17 +2,54 @@
 """A surviving process or a host-assisted import cannot pass recovery acceptance."""
 
 import copy
+import hashlib
+import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from package_dialog_recovery import MISSING_MODULE, RECOVERY_ROOT, validate_recovery
 from verify_dialog_interactions import RECOVERY_SCENARIOS
+from verify_dialog_interactions import application_executable
 
 
 class RecoveryEvidenceTests(unittest.TestCase):
+    def test_real_report_producer_distinguishes_native_launcher_from_relocated_payload(self):
+        with tempfile.TemporaryDirectory(prefix="licasa-report-identity-") as temporary:
+            root = Path(temporary)
+            app = root / "licasa"
+            payload = root / "licasa.bin"
+            app.write_text('#!/bin/sh\nexec "$(dirname "$0")/licasa.bin" "$@"\n')
+            shutil.copy2("/bin/true", payload)
+            diagnostic, sample = root / "diagnostic", root / "photo"
+            diagnostic.write_bytes(b"diagnostic identity fixture")
+            sample.write_bytes(b"sample identity fixture")
+            for wrapped in (True, False):
+                with self.subTest(wrapped=wrapped):
+                    if not wrapped:
+                        shutil.copy2(payload, app)
+                        payload.unlink()
+                    output = root / "report.json"
+                    # Unsupported native driving returns after recording real
+                    # input identities, before any display/process setup.
+                    result = subprocess.run([sys.executable, str(ROOT / "tools/verify_dialog_interactions.py"),
+                        "--app", str(app), "--diagnostic", str(diagnostic), "--sample", str(sample),
+                        "--output", str(output), "--dialog-backend", "native"],
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    report = json.loads(output.read_text())
+                    isolated = root / "relocated-licasa"
+                    shutil.copy2(application_executable(app), isolated)
+                    self.assertEqual(report["app_sha256"], hashlib.sha256(isolated.read_bytes()).hexdigest())
+                    self.assertEqual(report["app_launcher_sha256"], hashlib.sha256(app.read_bytes()).hexdigest())
+                    self.assertEqual(report["app_executable_path"], str(application_executable(app)))
+                    self.assertEqual(report["app_sha256"] == report["app_launcher_sha256"], not wrapped)
+
     def fixture(self, native=False):
         roots = (["/usr/lib/x86_64-linux-gnu", "/usr/lib/licasa/lib"] if native
                  else [RECOVERY_ROOT + "/usr/lib"])

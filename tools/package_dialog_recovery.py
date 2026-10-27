@@ -31,6 +31,7 @@ def run_dialog_recovery(image: str, *, app: str, diagnostic: str, sample: Path,
 from pathlib import Path
 sys.path.insert(0, '/qualification/tools')
 from qt_runtime import validate_runtime
+from verify_dialog_interactions import application_executable
 root = Path({RECOVERY_ROOT!r})
 qml = Path({isolated_qml!r})
 if {native!r}:
@@ -40,9 +41,7 @@ if {native!r}:
     # Native packages keep their pre-exec transaction wrapper at the public
     # path. This diagnostic relocation needs the actual ELF and its local Qt
     # config, so it cannot follow the wrapper back into the working runtime.
-    source_app = Path({app!r} + '.bin')
-    if not source_app.is_file():
-        source_app = Path({app!r})
+    source_app = application_executable(Path({app!r}))
     shutil.copy2(source_app, {broken_app!r})
     shutil.copy2({diagnostic!r}, {broken_diagnostic!r})
     # Keep installed startup assets when relocating the native executables.

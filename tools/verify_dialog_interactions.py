@@ -37,6 +37,12 @@ def sha256(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def application_executable(app: Path) -> Path:
+    """Resolve the native launch gate's payload without bypassing its launch."""
+    payload = Path(str(app) + ".bin")
+    return payload if payload.is_file() else app
+
+
 def stop(process: subprocess.Popen | None) -> None:
     if process is not None and process.poll() is None:
         os.killpg(process.pid, signal.SIGTERM)
@@ -89,7 +95,10 @@ def main() -> int:
         for path in (args.app, args.diagnostic, args.sample):
             if not path.is_file():
                 raise RuntimeError(f"Missing qualification input: {path}")
-        report.update(app_sha256=sha256(args.app), diagnostic_sha256=sha256(args.diagnostic),
+        report.update(app_sha256=sha256(application_executable(args.app)),
+                      app_launcher_sha256=sha256(args.app),
+                      app_executable_path=str(application_executable(args.app)),
+                      diagnostic_sha256=sha256(args.diagnostic),
                       sample_sha256=sha256(args.sample))
         if args.dialog_backend == "native":
             report.update(status="unsupported", error="Native picker qualification requires an interactive desktop driver; fallback is never accepted as native.")

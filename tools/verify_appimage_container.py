@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 
 from display_session_results import parse_display_graphics
+from check_package_report import write_checked_report
 from verify_installed_release import SAMPLES
 from package_dialog_checks import run_dialog_checks
 from package_motion_checks import run_motion_checks
@@ -187,8 +188,9 @@ def main() -> None:
         report["runtime_dependencies_checked_before_desktop_tools"] = True
         report["host_runtime_packages"] = HOST_RUNTIME_PACKAGES
         report["appimage_sha256"] = hashlib.sha256(appimage.read_bytes()).hexdigest()
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2) + "\n")
+    target_id = {"debian-13": "debian13-appimage", "ubuntu-24.04": "ubuntu24-appimage",
+                 "ubuntu-26.04": "ubuntu26-appimage"}[args.target]
+    write_checked_report(report, target_id=target_id, package=appimage, output=args.output)
     print(f"Clean AppImage launched the viewer and decoded {len(samples)} samples: {args.output}")
 
 

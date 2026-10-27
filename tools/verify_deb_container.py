@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 
 from display_session_results import parse_display_graphics
+from check_package_report import write_checked_report
 from package_dialog_checks import run_dialog_checks
 from package_motion_checks import run_motion_checks
 
@@ -153,8 +154,9 @@ def main() -> None:
             qt_version="6.8.2" if args.target == "debian-13" else "6.4.2")
         report["runtime_dependencies_checked_before_desktop_tools"] = True
         report["package_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, indent=2) + "\n")
+        write_checked_report(report, target_id=("debian13-native" if args.target == "debian-13"
+                                               else "ubuntu24-native"),
+                             package=package, output=args.output)
         print(f"Clean {args.target} apt install, dialogs, viewer and {len(SAMPLES)} decodes passed: {args.output}")
 
 

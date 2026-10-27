@@ -53,6 +53,15 @@ jobs:
           tags: licasa-verification:${{ inputs.target }}
           cache-from: type=gha,scope=package-ci-${{ inputs.target }}
           cache-to: type=gha,scope=package-ci-${{ inputs.target }},mode=min,ignore-error=true
+      - name: Check native container test and report contracts
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          docker run --rm -v "$PWD:/source:ro" --workdir /tmp \
+            "licasa-verification:$TARGET" bash -ec '
+              python3 -B /source/tests/test_ci_package_build.py -v
+              python3 -B /source/tests/test_dialog_recovery.py -v
+            '
       - name: Restore only exact native dependency outputs
         id: dependencies
         uses: actions/cache@v5

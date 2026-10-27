@@ -16,6 +16,15 @@ def check_report(report: dict, target: dict, manifest: dict, package: Path) -> N
     validate_report(report, target, manifest)
 
 
+def write_checked_report(report: dict, *, target_id: str, package: Path, output: Path) -> None:
+    """Retain raw evidence, then require CI's full contract before success."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + "\n")
+    manifest = load_manifest()
+    target = next(row for row in manifest["targets"] if row["id"] == target_id)
+    check_report(report, target, manifest, package)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
